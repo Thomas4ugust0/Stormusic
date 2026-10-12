@@ -1,0 +1,10 @@
+{
+  "description": "This mobile music app offers personalized playlists and curated tracks tailored to individual preferences, enhancing the listening experience for music lovers.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

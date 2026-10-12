@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AudioFlow</title><link rel="icon" href="/static/favicon.svg">
+<style>
+  :root{color-scheme:dark;font-family:system-ui,sans-serif}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0c;color:#eee}
+  main{width:min(560px,92vw)} h1{font-size:28px;margin:0 0 4px} p{color:#999;margin:0 0 20px}
+  input,select,button{font:inherit;border-radius:10px;border:1px solid #2a2a2e;background:#151517;color:#eee;padding:12px}
+  input[type=url],input[type=password]{width:100%;box-sizing:border-box;margin-bottom:10px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px} button{background:#ff3355;border:0;font-weight:600;cursor:pointer}
+  label{font-size:14px;color:#bbb} #out{margin-top:18px;font-size:14px;white-space:pre-wrap}
+  .bar{height:6px;background:#222;border-radius:3px;overflow:hidden;margin-top:10px}.bar i{display:block;height:100%;background:#ff3355;width:0}
+  a{color:#ff6b85}
+</style>
+</head>
+<body><main>
+<h1>AudioFlow</h1><p>Cole a URL de um vídeo público do YouTube. Sem anúncios, sem rastreadores.</p>
+<form id="f">
+  <input id="url" type="url" required placeholder="https://www.youtube.com/watch?v=...">
+  <input id="key" type="password" placeholder="API key (se exigida)">
+  <div class="row">
+    <select id="fmt"><option>mp3</option><option>m4a</option><option>flac</option><option>wav</option><option>original</option></select>
+    <select id="q"><option>high</option><option>medium</option><option>low</option><option>max</option></select>
+    <label><input id="sp" type="checkbox"> Remover patrocínios</label>
+  </div>
+  <label><input id="terms" type="checkbox" required> Tenho o direito de baixar e usar este conteúdo</label>
+  <div class="row" style="margin-top:12px"><button>Extrair áudio</button></div>
+</form>
+<div class="bar"><i id="bar"></i></div><div id="out"></div>
+<script>
+const $ = (id) => document.getElementById(id);
+const hdr = () => ($('key').value ? { 'X-API-Key': $('key').value } : {});
+$('f').onsubmit = async (e) => {
+  e.preventDefault(); $('out').textContent = 'Criando tarefa…'; $('bar').style.width = '0';
+  const r = await fetch('/api/v1/audio/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json', ...hdr() },
+    body: JSON.stringify({ source_url: $('url').value, format: $('fmt').value, quality: $('q').value,
+      remove_sponsors: $('sp').checked, terms_accepted: $('terms').checked }) });
+  const j = await r.json(); if (!r.ok) { $('out').textContent = j.error.message; return; }
+  const poll = async () => {
+    const s = await (await fetch('/api/v1/audio/jobs/' + j.job_id, { headers: hdr() })).json();
+    $('bar').style.width = s.progress + '%';
+    $('out').textContent = `${s.status} · ${s.progress}%` + (s.video?.title ? `\n${s.video.title}` : '') +
+      (s.warnings?.length ? '\n\n' + s.warnings.join('\n') : '') + (s.error ? '\n' + s.error.message : '');
+    if (s.status === 'completed') {
+      const b = await (await fetch(`/api/v1/audio/jobs/${j.job_id}/download`, { headers: hdr() })).blob();
+      const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.textContent = 'Baixar arquivo';
+      a.download = `${s.video?.title || 'audio'}.${s.format === 'original' ? '' : s.format}`; $('out').append('\n', a);
+    } else if (!['failed', 'cancelled'].includes(s.status)) setTimeout(poll, 1500);
+  };
+  poll();
+};
+</script>
+</main></body></html>

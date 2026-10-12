@@ -1,0 +1,45 @@
+# Produção (Oracle Cloud ARM): docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Ajustado para VM.Standard.E2.1.Micro (1 GB RAM): /tmp em disco, 1 job por vez, Postgres/Redis enxutos.
+services:
+  api:
+    ports: !reset []
+    expose: ["8000"]
+    tmpfs: !reset []
+    volumes: ["audio-data:/data", "work-tmp:/tmp"]
+
+  worker:
+    tmpfs: !reset []
+    volumes: ["audio-data:/data", "work-tmp:/tmp"]
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "-Q", "audio", "--concurrency", "1", "--max-tasks-per-child", "20", "--loglevel", "INFO"]
+
+  beat:
+    tmpfs: !reset []
+    volumes: ["audio-data:/data", "work-tmp:/tmp"]
+
+  migrate:
+    tmpfs: !reset []
+    volumes: ["audio-data:/data", "work-tmp:/tmp"]
+
+  postgres:
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=20", "-c", "work_mem=2MB"]
+
+  redis:
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "48mb", "--maxmemory-policy", "noeviction"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:?defina DOMAIN no .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/web:/srv/web:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [api]
+
+volumes:
+  work-tmp:
+  caddy-data:
+  caddy-config:

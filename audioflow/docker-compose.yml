@@ -1,0 +1,66 @@
+x-app: &app
+  build: .
+  env_file: .env
+  restart: unless-stopped
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  tmpfs: ["/tmp:size=2g"]
+  volumes: ["audio-data:/data"]
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
+services:
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    <<: *app
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  worker:
+    <<: *app
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "-Q", "audio", "--concurrency", "${MAX_CONCURRENT_JOBS:-4}", "--loglevel", "INFO"]
+    healthcheck: {disable: true}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  beat:
+    <<: *app
+    command: ["celery", "-A", "app.tasks.celery_app", "beat", "--schedule", "/tmp/celerybeat-schedule", "--loglevel", "INFO"]
+    healthcheck: {disable: true}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: audioflow
+      POSTGRES_DB: audioflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audioflow"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  audio-data:
+  pg-data:
+  redis-data:
