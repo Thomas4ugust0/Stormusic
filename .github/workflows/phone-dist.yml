@@ -1,0 +1,42 @@
+name: Phone distribution
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+permissions:
+  contents: write
+concurrency:
+  group: phone-dist
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:relay
+      - run: pnpm build:phone
+      - name: Publish runtime only
+        shell: bash
+        run: |
+          stage=$(mktemp -d)
+          cp -r dist server phone package.json "$stage/"
+          cd "$stage"
+          git init -b phone-dist
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          git add .
+          git update-index --chmod=+x phone/*.sh
+          git commit -m 'Build phone distribution'
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push --force origin phone-dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

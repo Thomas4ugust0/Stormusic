@@ -1,4 +1,5 @@
-// Client side of the ad-free pipeline. Order of attempts:
+// Local mode uses only same-origin extraction; the cascade below is legacy.
+// Client side of the legacy pipeline. Order of attempts:
 //  0. AudioFlow API (own backend, see audioflow/) when configured: job → poll → authenticated download.
 //  1. Own relay (/api/resolve) — server-side, no CORS, races many Piped/Invidious
 //     instances and proxies the full-length audio with Range support.
@@ -6,6 +7,22 @@
 //  3. Royalty-free demo stream, so the UI never dead-ends.
 // Only a plain HTML5 <audio> is used: no YouTube IFrame, Data API or ad scripts.
 import { offlineUrl } from './offline'
+import { rememberDuration } from './taste'
+
+export const getMode = (): 'local' | 'audioflow' => localStorage.getItem('ytm.mode') === 'audioflow' ? 'audioflow' : 'local'
+export const setMode = (mode: 'local' | 'audioflow') => { localStorage.setItem('ytm.mode', mode); cache.clear() }
+export async function localRequest(path: string, init: RequestInit = {}, timeout = 120000): Promise<Response> {
+  let response: Response
+  try { response = await fetch(path, { ...init, signal: AbortSignal.timeout(timeout) }) }
+  catch { throw new Error('Servidor parado. Toque no atalho Stormusic na tela inicial e tente de novo.') }
+  if (!response.ok) { const body = await response.json().catch(() => null); throw new Error(body?.error?.message || `Falha no motor local (HTTP ${response.status})`) }
+  return response
+}
+async function localAudio(id: string): Promise<Resolved> {
+  const r = await (await localRequest(`/api/resolve/${id}`)).json()
+  if (r.duration) rememberDuration(id, r.duration)
+  return { ...r, real: true }
+}
 
 const LOCAL = import.meta.env.BASE_URL.replace(/\/$/, '')
 
@@ -185,6 +202,13 @@ async function json(url: string, ms: number) {
 
 /** Full audio file through AudioFlow, used by the offline downloader (no Range, whole file). */
 export async function fetchAudioBlob(ytId: string): Promise<Blob> {
+  if (getMode() === 'local') {
+    const r = await localAudio(ytId)
+    const response = await localRequest(r.url, {}, 180000)
+    const blob = await response.blob()
+    if (!blob.size || !/audio|video|octet-stream/.test(blob.type)) throw new Error('O servidor não retornou um arquivo de áudio válido.')
+    return blob
+  }
   const c = getAudioFlow()
   if (!afReady(c)) throw new AudioFlowError('no_url', 'AudioFlow não configurada')
   return (await viaAudioFlow(c, ytId)).blob!
@@ -193,6 +217,7 @@ export async function fetchAudioBlob(ytId: string): Promise<Blob> {
 async function run(ytId: string, idx: number, live: boolean, onStatus?: (s: string) => void): Promise<Resolved> {
   const off = await offlineUrl(ytId).catch(() => null)
   if (off) return { url: off, source: 'Offline', real: true }
+  if (getMode() === 'local') { onStatus?.('Resolvendo no celular…'); return localAudio(ytId) }
   if (live && !navigator.onLine) throw new AudioFlowError('offline', 'Sem conexão e faixa não baixada')
   if (live) {
     const c = getAudioFlow()
@@ -224,13 +249,13 @@ export let lastAudioFlowError = ''
 
 export function resolveAudio(ytId: string, idx: number, live: boolean, onStatus?: (s: string) => void): Promise<Resolved> {
   const key = ytId + live
-  const hit = cache.get(key); if (hit) return Promise.resolve(hit)
-  if (!inflight.has(key)) inflight.set(key, run(ytId, idx, live, onStatus).then((r) => { if (r.real || !live) cache.set(key, r); inflight.delete(key); return r }))
+  const hit = cache.get(key); if (hit && getMode() !== 'local') return Promise.resolve(hit)
+  if (!inflight.has(key)) inflight.set(key, run(ytId, idx, live, onStatus).then((r) => { if (r.real || !live) cache.set(key, r); return r }).finally(() => { inflight.delete(key) }))
   return inflight.get(key)!
 }
 
 // Warm the next tracks so skips are instant.
-export const prefetch = (ids: { ytId: string; idx: number }[], live: boolean) => ids.forEach((t) => void resolveAudio(t.ytId, t.idx, live))
+export const prefetch = (ids: { ytId: string; idx: number }[], live: boolean) => ids.forEach((t) => void resolveAudio(t.ytId, t.idx, live).catch(() => {}))
 export const invalidate = (ytId: string) => {
   const r = cache.get(ytId + true)
   if (r?.url.startsWith('blob:')) URL.revokeObjectURL(r.url)
@@ -241,6 +266,7 @@ export const invalidate = (ytId: string) => {
 export type SearchHit = { id: string; title: string; artist: string; album?: string | null; duration?: number | null }
 
 export async function searchMusic(q: string): Promise<SearchHit[]> {
+  if (getMode() === 'local') return (await (await localRequest(`/api/v1/audio/search?q=${encodeURIComponent(q)}&limit=25`)).json()).results
   const c = getAudioFlow()
   if (!c.url) throw new AudioFlowError('no_url', 'Configure a AudioFlow API (Biblioteca → AudioFlow API) para buscar no YouTube Music')
   const r = await af(c, `/api/v1/audio/search?q=${encodeURIComponent(q)}&limit=25`, {}, 30000)
@@ -249,6 +275,7 @@ export async function searchMusic(q: string): Promise<SearchHit[]> {
 
 /** YouTube Music radio for a track: what the YouTube algorithm would play next. */
 export async function relatedMusic(ytId: string): Promise<SearchHit[]> {
+  if (getMode() === 'local') return (await (await localRequest(`/api/v1/audio/related?id=${encodeURIComponent(ytId)}&limit=25`)).json()).results
   const c = getAudioFlow()
   if (!c.url) throw new AudioFlowError('no_url', 'AudioFlow não configurada')
   const r = await af(c, `/api/v1/audio/related?id=${encodeURIComponent(ytId)}&limit=25`, {}, 30000)

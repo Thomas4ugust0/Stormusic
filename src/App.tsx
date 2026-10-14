@@ -1,9 +1,12 @@
+import LocalEngine from './components/LocalEngine'
+import { getMode } from './lib/stream'
+import { rememberDuration, knownDuration } from './lib/taste'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Home, Compass, Library, Clapperboard, Play, Pause, SkipForward, SkipBack, ThumbsUp, ThumbsDown, ChevronDown, Search, Cast, Sparkles, Shuffle, Repeat, Check, RefreshCw, ListMusic, Heart, Download, CloudOff, CheckCircle2, Trash2, Smartphone } from 'lucide-react'
 import { TRACKS, GENRES, ARTISTS, MOODS, thumb, fmt, type Track, type Mood } from './lib/data'
 import { buildBlock, isKnown, type Profile, type Feedback } from './lib/supermix'
 import { generateSupermix, savedMix, isStale, radioFrom, extend, record, recordPlayback, likedTracks, isLiked, hitToTrack, REFRESH_MS, type Mix as MixT } from './lib/taste'
-import { downloadMix, offlineState, isOffline, goodNetwork, storageInfo, clearOffline, type Progress } from './lib/offline'
+import { downloadMix, offlineTracks, offlineState, isOffline, goodNetwork, storageInfo, clearOffline, type Progress } from './lib/offline'
 import { resolveAudio, prefetch, invalidate, getRelay, setRelay, getAudioFlow, setAudioFlow, testAudioFlow, afFromHost, lastAudioFlowError, searchMusic, type AudioFlowCfg } from './lib/stream'
 
 const load = <T,>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') as T } catch { return d } }
@@ -73,6 +76,7 @@ function Row({ t, active, onPlay, right }: { t: Track; active?: boolean; onPlay:
     <div onClick={onPlay} className="flex items-center gap-3 py-2 active:bg-white/5 rounded">
       <img src={thumb(t, 'mq')} className="w-12 h-12 rounded object-cover" />
       <div className="flex-1 min-w-0"><div className={`truncate text-[15px] ${active ? 'text-[#ff4e6b]' : ''}`}>{t.title}</div><div className="truncate text-[13px] text-white/60">{t.artist} · {t.sub}</div></div>
+      {knownDuration(t.ytId, t.dur) > 0 && <span className="text-white/50 text-xs">{fmt(knownDuration(t.ytId, t.dur))}</span>}
       {right}
     </div>
   )
@@ -172,7 +176,7 @@ export default function App() {
     if (online) return base
     // Offline: only what was downloaded is playable.
     const st = offlineState()
-    return (mix?.tracks ?? []).filter((t) => st?.ids.includes(t.ytId))
+    return (offlineTracks().length ? offlineTracks() : mix?.tracks ?? []).filter((t) => st?.ids.includes(t.ytId))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, mood, fb, mix, online, offRev])
   const kindOf = (t: Track): 'fav' | 'disc' => (mood === 'all' && mix?.kinds[t.ytId]) || (profile && isKnown(t, profile, fb) ? 'fav' : 'disc')
@@ -223,7 +227,7 @@ export default function App() {
     if (!profile || !queue.length || idx + 4 < queue.length || extending.current) return
     if (!online) {
       // Offline: loop through downloaded tracks only.
-      const st = offlineState(); const pool = (mix?.tracks ?? []).filter((t) => st?.ids.includes(t.ytId))
+      const st = offlineState(); const pool = (offlineTracks().length ? offlineTracks() : mix?.tracks ?? []).filter((t) => st?.ids.includes(t.ytId))
       if (pool.length) setQueue((qq) => [...qq, ...pool.sort(() => Math.random() - 0.5)])
       return
     }
@@ -248,12 +252,13 @@ export default function App() {
     setFb((f) => ({ ...f, played: [...f.played.slice(-40), cur.id] }))
     resolveAudio(cur.ytId, TRACKS.indexOf(cur), live, (st) => { if (!off) setSource(st) }).then((r) => {
       if (off || !audio.current) return
-      setSource(r.source); setDur(r.duration ?? 0); audio.current.src = r.url
+      if (r.duration) { rememberDuration(cur.ytId, r.duration, cur); cur.dur = r.duration }
+      setSource(r.source); setDur(r.duration ?? knownDuration(cur.ytId, cur.dur)); audio.current.src = r.url
       if (playing) audio.current.play().catch(() => setPlaying(false))
-    }).catch((e) => { if (off) return; setSource(e instanceof Error ? e.message : String(e)); setTimeout(() => { if (!off) next() }, 600) })
+    }).catch((e) => { if (off) return; setSource(e instanceof Error ? e.message : String(e)); setPlaying(false) })
     prefetch(queue.slice(idx + 1, idx + 3).map((t) => ({ ytId: t.ytId, idx: TRACKS.indexOf(t) })), live)
     if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.artist, album: 'Supermix', artwork: [{ src: thumb(cur), sizes: '480x360', type: 'image/jpeg' }] })
+      navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.artist, album: cur.sub, artwork: [{ src: thumb(cur), sizes: '480x360', type: 'image/jpeg' }] })
     }
     return () => { off = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -295,7 +300,7 @@ export default function App() {
 
   return (
     <div className="h-full max-w-[480px] mx-auto relative bg-[#030303] overflow-hidden flex flex-col">
-      <audio ref={audio} preload="auto" onTimeUpdate={(e) => { const ct = e.currentTarget.currentTime; setTime(ct); const l = listen.current; if (l) { const d = ct - l.last; if (d > 0 && d < 2) l.sec += d; l.last = ct } }} onLoadedMetadata={(e) => { const d = e.currentTarget.duration; if (isFinite(d) && d > 0) setDur(d) }} onEnded={() => { if (listen.current) listen.current.ended = true; next() }} onError={() => { if (source.startsWith('Resolv')) return; if (cur) invalidate(cur.ytId); listen.current = null; next() }} />
+      <audio ref={audio} preload="auto" onTimeUpdate={(e) => { const ct = e.currentTarget.currentTime; setTime(ct); const l = listen.current; if (l) { const d = ct - l.last; if (d > 0 && d < 2) l.sec += d; l.last = ct } }} onLoadedMetadata={(e) => { const d = e.currentTarget.duration; if (isFinite(d) && d > 0) { setDur(d); if (cur) rememberDuration(cur.ytId, d, cur) } }} onEnded={() => { if (listen.current) listen.current.ended = true; next() }} onError={() => { if (source.startsWith('Resolv')) return; if (cur) invalidate(cur.ytId); listen.current = null; setPlaying(false); setSource('Falha na reprodução. Tente novamente ou troque de rede.') }} />
 
       <header className="pt-safe sticky top-0 z-20 bg-[#030303]/95 backdrop-blur">
         <div className="h-14 px-4 flex items-center justify-between">
@@ -359,7 +364,7 @@ export default function App() {
             {filtered.length > 0 && <><h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-1">Na sua biblioteca</h2>
               {filtered.map((t, i) => <Row key={t.id} t={t} onPlay={() => startMix(filtered, i)} />)}</>}
             <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mt-4 mb-1 flex items-center gap-2">Músicas · YouTube Music {searching && <RefreshCw size={12} className="animate-spin" />}</h2>
-            {hits.map((t, i) => <Row key={t.id} t={t} active={cur?.ytId === t.ytId} onPlay={() => playRadio(t)} right={t.dur ? <span className="text-white/50 text-xs">{fmt(t.dur)}</span> : undefined} />)}
+            {hits.map((t, i) => <Row key={t.id} t={t} active={cur?.ytId === t.ytId} onPlay={() => playRadio(t)} />)}
             {!searching && !hits.length && <div className="text-sm text-white/50 py-3">{searchErr || (q.trim().length < 2 ? 'Digite ao menos 2 letras' : 'Nenhuma música encontrada')}</div>}
           </div> : (<>
             <h2 className="text-xl font-bold mt-6 mb-3">Humor e gêneros</h2>
@@ -387,6 +392,8 @@ export default function App() {
               {installEvt && <button onClick={async () => { await installEvt.prompt(); setInstallEvt(null) }} className="h-9 px-4 rounded-full bg-white text-black font-medium flex items-center gap-2"><Smartphone size={14} /> Instalar app</button>}
             </div>
           </div>
+          <LocalEngine />
+          {getMode() === 'audioflow' && <details><summary className="mt-4 text-sm text-white/60">Configuração AudioFlow (legado)</summary>
           <h2 className="text-lg font-bold mt-6 mb-1">Servidor de stream</h2>
           <p className="text-xs text-white/50 mb-2">Relay com yt-dlp no seu PC ou no celular (Termux). Vazio = relay embutido.</p>
           <div className="flex gap-2"><input value={relay} onChange={(e) => setRelayInput(e.target.value)} placeholder="http://192.168.0.10:8787" className="flex-1 h-10 px-3 rounded-lg bg-white/10 outline-none text-sm" />
@@ -415,6 +422,7 @@ export default function App() {
             }} className="h-10 px-4 rounded-lg bg-white text-black text-sm font-medium">Salvar e testar</button>
           </div>
           {afStatus && <div className={`text-xs mt-2 ${afStatus.startsWith('Conectada') ? 'text-emerald-300/80' : 'text-amber-300/80'}`}>{afStatus}</div>}
+          </details>}
           {liked.length > 0 && <h2 className="text-lg font-bold mt-6 mb-1">Curtidas</h2>}
           {liked.map((t, i) => <Row key={t.id} t={t} onPlay={() => startMix(liked, i)} />)}
         </>)}

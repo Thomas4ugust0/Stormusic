@@ -14,7 +14,7 @@ export default defineConfig(({ mode }) => {
   const emitSourcemaps = mode === 'development'
 
   return {
-    base: process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : '/',
+    base: mode !== 'phone' && process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : '/',
     build: {
       sourcemap: emitSourcemaps ? 'inline' : false,
       minify: !emitSourcemaps,
@@ -27,8 +27,8 @@ react(),
         registerType: 'autoUpdate',
         includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
         manifest: {
-          name: 'Music',
-          short_name: 'Music',
+          name: 'Stormusic',
+          short_name: 'Stormusic',
           description: 'Supermix pessoal sem anúncios',
           lang: 'pt-BR',
           display: 'standalone',
@@ -46,7 +46,7 @@ react(),
         workbox: {
           globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
           navigateFallback: 'index.html',
-          navigateFallbackDenylist: [/^\/api\//, /^\/offline\//],
+          navigateFallbackDenylist: [/^\/health(?:\/|$)/, /^\/api\//, /^\/offline\//],
           runtimeCaching: [
             {
               urlPattern: ({ url }) => /(ytimg\.com|ggpht\.com|googleusercontent\.com)$/.test(url.hostname),
@@ -61,7 +61,7 @@ react(),
           ],
         },
       }),
-      figmaSiteConfiguration(siteConfiguration),
+      figmaSiteConfiguration(mode === 'phone' ? { ...siteConfiguration, title: 'Stormusic', language: 'pt-BR' } : siteConfiguration),
       figmaErrorOverlayReplay(),
       figmaReactRefreshBoundaryFallback(),
       figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),

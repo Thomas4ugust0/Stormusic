@@ -1,3 +1,5 @@
+> **Legado / superado:** o modo principal agora roda no celular. Consulte [PHONE.md](../docs/PHONE.md). Este documento descreve somente a arquitetura anterior.
+
 # PWA instalável + Supermix offline (25 faixas)
 
 ## Decisões

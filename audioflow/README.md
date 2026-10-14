@@ -1,3 +1,5 @@
+> **Legado / superado:** o modo principal agora roda no celular. Consulte [PHONE.md](../docs/PHONE.md). Este documento descreve somente a arquitetura anterior.
+
 # AudioFlow API
 
 API REST para extrair o áudio de vídeos **públicos** do YouTube, entregue **sem anúncios**

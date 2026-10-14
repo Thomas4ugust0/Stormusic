@@ -1,7 +1,8 @@
 // Offline Supermix: whole audio files stored in Cache Storage (`mix-<at>`).
 // Only the most recent mix is kept; older caches are dropped once the new one finishes.
 import { fetchAudioBlob } from './stream'
-import type { Mix } from './taste'
+import { knownDuration, rememberDuration, type Mix } from './taste'
+import type { Track } from './data'
 
 const KEY = 'ytm.offlineMix'
 const PREFIX = 'mix-'
@@ -15,6 +16,9 @@ export const offlineState = (): OfflineState | null => {
   try { return JSON.parse(localStorage.getItem(KEY) || 'null') } catch { return null }
 }
 export const isOffline = (ytId: string) => Boolean(offlineState()?.ids.includes(ytId))
+export function offlineTracks(): Track[] {
+  try { return JSON.parse(localStorage.getItem('ytm.offlineTracks') || '[]') } catch { return [] }
+}
 const supported = () => typeof caches !== 'undefined'
 
 const urls = new Map<string, string>()
@@ -59,7 +63,7 @@ export const downloading = () => running !== null
 
 async function run(mix: Mix, onProgress: (p: Progress) => void) {
   if (!supported()) throw new Error('Cache Storage indisponível neste navegador')
-  if (offlineState()?.at === mix.at) return
+  if (offlineState()?.at === mix.at && offlineState()!.ids.length === mix.tracks.length) return
   await navigator.storage?.persist?.().catch(() => false)
   const { used, quota } = await storageInfo()
   if (quota && quota - used < MIN_FREE) throw new Error('Pouco espaço livre (menos de 150 MB)')
@@ -75,11 +79,16 @@ async function run(mix: Mix, onProgress: (p: Progress) => void) {
   const queue = [...ids]
   const worker = async () => {
     for (let id = queue.shift(); id; id = queue.shift()) {
-      if (await cache.match(path(id))) { ok.push(id); report(); continue }
+      const track = mix.tracks.find((t) => t.ytId === id)!
+      // Register metadata even if this track has no duration yet.
+      rememberDuration(id, track.dur || 0, track)
       let saved = false
       for (let attempt = 0; attempt < 3 && !saved; attempt++) {
         try {
-          const blob = await fetchAudioBlob(id)
+          const existing = await cache.match(path(id))
+          const blob = existing ? await existing.blob() : await fetchAudioBlob(id)
+          track.dur = knownDuration(id, track.dur)
+          await cacheCovers(id)
           await cache.put(path(id), new Response(blob, { headers: { 'Content-Type': blob.type || 'audio/mp4', 'Content-Length': String(blob.size) } }))
           saved = true
         } catch { /* retry */ }
@@ -91,6 +100,9 @@ async function run(mix: Mix, onProgress: (p: Progress) => void) {
   await Promise.all([worker(), worker()]) // concurrency 2
 
   if (!ok.length) { await caches.delete(name); throw new Error('Nenhuma faixa pôde ser baixada') }
+  if (failed) throw new Error(`${ok.length}/${ids.length} faixas baixadas. Tente novamente para completar; o mix anterior foi preservado.`)
+  localStorage.setItem('ytm.supermix', JSON.stringify(mix))
+  localStorage.setItem('ytm.offlineTracks', JSON.stringify(mix.tracks))
   localStorage.setItem(KEY, JSON.stringify({ at: mix.at, ids: ok } satisfies OfflineState))
   for (const n of await caches.keys()) if (n.startsWith(PREFIX) && n !== name) await caches.delete(n)
   for (const [id, u] of urls) if (!ok.includes(id)) { URL.revokeObjectURL(u); urls.delete(id) }
@@ -101,4 +113,18 @@ export async function clearOffline() {
   for (const u of urls.values()) URL.revokeObjectURL(u)
   urls.clear()
   localStorage.removeItem(KEY)
+  localStorage.removeItem('ytm.offlineTracks')
+}
+
+async function cacheCovers(id: string) {
+  const cache = await caches.open('thumbs')
+  for (const size of ['hq', 'mq']) {
+    const url = 'https://i.ytimg.com/vi/' + id + '/' + size + 'default.jpg'
+    if (await cache.match(url)) continue
+    const response = await fetch(url, { mode: 'no-cors', signal: AbortSignal.timeout(15000) })
+    if (response.type !== 'opaque' && !response.ok) throw new Error('Não foi possível baixar a capa.')
+    await cache.put(url, response)
+  }
+  const keys = await cache.keys()
+  for (const key of keys.slice(0, Math.max(0, keys.length - 200))) await cache.delete(key)
 }

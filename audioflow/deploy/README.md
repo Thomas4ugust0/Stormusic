@@ -1,3 +1,5 @@
+> **Legado / superado:** o modo principal agora roda no celular. Consulte [PHONE.md](../../docs/PHONE.md). Este documento descreve somente a arquitetura anterior.
+
 # Deploy na Oracle Cloud (ARM, Always Free)
 
 1. **VM**: `VM.Standard.E2.1.Micro` (AMD, 1 GB) ou `VM.Standard.A1.Flex` (ARM), Ubuntu 22.04.

@@ -27,6 +27,23 @@ const load = (): Store => { try { const s = JSON.parse(localStorage.getItem(KEY)
 let store = load()
 const save = () => localStorage.setItem(KEY, JSON.stringify(store))
 
+/** Preserve resolved metadata without adding a taste signal. */
+export function rememberDuration(id: string, duration: number, track?: Track) {
+  if (!Number.isFinite(duration) || duration < 0) return
+  const t = track || TRACKS.find((t) => t.ytId === id)
+  const previous = store.meta[id]
+  if (previous || t) {
+    store.meta[id] = { title: previous?.title || t!.title, artist: previous?.artist || t!.artist, sub: previous?.sub || t!.sub, dur: duration || previous?.dur || 0 }
+    save()
+  }
+  const mix = savedMix()
+  if (mix?.tracks.some((t) => t.ytId === id)) {
+    for (const t of mix.tracks) if (t.ytId === id) { t.dur = duration; store.meta[id] = { title: t.title, artist: t.artist, sub: t.sub, dur: duration } }
+    localStorage.setItem(MIX_KEY, JSON.stringify(mix)); save()
+  }
+}
+export const knownDuration = (id: string, fallback = 0) => store.meta[id]?.dur || fallback
+
 // --- normalisation: detects "variations of the same song" ----------------------------------
 const NOISE = /\b(feat|ft|featuring|with|remaster(ed)?|\d{4} remaster|live|ao vivo|acoustic|acustico|remix|mix|edit|radio edit|extended|version|versao|cover|karaoke|instrumental|lyrics?|letra|legendado|official|oficial|video|clipe|audio|visualizer|hd|4k|sped up|slowed|reverb|nightcore|8d|mono|stereo|demo|deluxe|bonus track)\b/g
 export function titleKey(t: string): string {
@@ -41,7 +58,7 @@ const sameSong = (a: string, b: string) => !!a && !!b && (a === b || (Math.min(a
 
 // --- signals --------------------------------------------------------------------------------
 export function record(t: Track, k: Signal) {
-  store.meta[t.ytId] = { title: t.title, artist: t.artist, dur: t.dur, sub: t.sub }
+  store.meta[t.ytId] = { title: t.title, artist: t.artist, dur: knownDuration(t.ytId, t.dur), sub: t.sub }
   store.ev.push({ y: t.ytId, k, at: Date.now() })
   if (store.ev.length > 3000) store.ev = store.ev.slice(-3000)
   save()
@@ -83,11 +100,11 @@ export function likedTracks(): Track[] {
 export const stats = () => { const m = model(null); return { signals: store.ev.length, liked: [...m.vote.values()].filter((v) => v === 'like').length, artists: [...m.artist.values()].filter((v) => v > 0.5).length } }
 
 function toTrack(y: string): Track | null {
-  const local = TRACKS.find((t) => t.ytId === y); if (local) return local
+  const local = TRACKS.find((t) => t.ytId === y); if (local) return { ...local, dur: knownDuration(y, local.dur) }
   const m = store.meta[y]; if (!m) return null
   return { id: 'yt:' + y, ytId: y, title: m.title, artist: m.artist, genre: 'yt', sub: m.sub || 'Música', moods: [], energy: 0.5, dur: m.dur }
 }
-export const hitToTrack = (h: SearchHit): Track => ({ id: 'yt:' + h.id, ytId: h.id, title: h.title, artist: h.artist || 'Desconhecido', genre: 'yt', sub: h.album || 'Música', moods: [], energy: 0.5, dur: h.duration ?? 0 })
+export const hitToTrack = (h: SearchHit): Track => ({ id: 'yt:' + h.id, ytId: h.id, title: h.title, artist: h.artist || 'Desconhecido', genre: 'yt', sub: h.album || 'Música', moods: [], energy: 0.5, dur: knownDuration(h.id, h.duration ?? 0) })
 
 // --- generator ------------------------------------------------------------------------------
 type Cand = { t: Track; rank: number; votes: number }
