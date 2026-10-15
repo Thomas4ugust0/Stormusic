@@ -1,12 +1,22 @@
+import Downloads from './components/Downloads'
+import { Player } from './lib/player'
+import { initialPlayer } from './lib/playerMachine'
+import { buildPlan, type DailyPlan } from './lib/dailyPlan'
+import { libraryRequest, sendPlan, type Library as ServerLibrary } from './lib/libraryClient'
+import { mirrorLibrary } from './lib/offline'
+import { tasteEvents } from './lib/taste'
 import LocalEngine from './components/LocalEngine'
+import ProfilePanel from './components/ProfilePanel'
+import Confirm from './components/Confirm'
+import { backupTaste } from './lib/safety'
 import { getMode } from './lib/stream'
 import { rememberDuration, knownDuration } from './lib/taste'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Home, Compass, Library, Clapperboard, Play, Pause, SkipForward, SkipBack, ThumbsUp, ThumbsDown, ChevronDown, Search, Cast, Sparkles, Shuffle, Repeat, Check, RefreshCw, ListMusic, Heart, Download, CloudOff, CheckCircle2, Trash2, Smartphone } from 'lucide-react'
+import { Home, Compass, Library, Clapperboard, Play, Pause, SkipForward, SkipBack, ThumbsUp, ThumbsDown, ChevronDown, Search, Sparkles, Check, RefreshCw, ListMusic, Download, CloudOff, CheckCircle2, Trash2, Smartphone } from 'lucide-react'
 import { TRACKS, GENRES, ARTISTS, MOODS, thumb, fmt, type Track, type Mood } from './lib/data'
-import { buildBlock, isKnown, type Profile, type Feedback } from './lib/supermix'
-import { generateSupermix, savedMix, isStale, radioFrom, extend, record, recordPlayback, likedTracks, isLiked, hitToTrack, REFRESH_MS, type Mix as MixT } from './lib/taste'
-import { downloadMix, offlineTracks, offlineState, isOffline, goodNetwork, storageInfo, clearOffline, type Progress } from './lib/offline'
+import { buildBlock, type Profile, type Feedback } from './lib/supermix'
+import { generateSupermix, savedMix, radioFrom, extend, record, recordPlayback, likedTracks, isLiked, hitToTrack, type Mix as MixT } from './lib/taste'
+import { offlineTracks, offlineState, isOffline, storageInfo } from './lib/offline'
 import { resolveAudio, prefetch, invalidate, getRelay, setRelay, getAudioFlow, setAudioFlow, testAudioFlow, afFromHost, lastAudioFlowError, searchMusic, type AudioFlowCfg } from './lib/stream'
 
 const load = <T,>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') as T } catch { return d } }
@@ -15,9 +25,16 @@ const ago = (at: number) => { const m = Math.round((Date.now() - at) / 60000); r
 
 function Logo() {
   return (
-    <div className="flex items-center gap-1.5">
-      <div className="w-7 h-7 rounded-full grid place-items-center" style={{ background: RED }}><Play size={13} fill="#fff" stroke="none" className="ml-0.5" /></div>
-      <span className="font-semibold tracking-tight text-[19px]">Music</span>
+    <div className="flex items-center gap-2">
+      <svg viewBox="168.6 311.0 686.4 862.5" className="h-8 w-auto shrink-0" role="img" aria-label="Stormusic">
+        <path fill="#E50C16" d="M512 311 L855 509.5 L855 975 L512 1173.5 L168.6 974 L168.6 509.2 Z"/>
+        <path fill="#fff" d="M505.3 489 L855 699.2 L855 748.8 L505.3 537.5 Z"/>
+        <path fill="#fff" d="M505.3 406.2 L855 615 L855 665.2 L505.3 454.8 Z"/>
+        <path fill="#fff" d="M168.6 747 L514.5 955 L514.5 1003.5 L168.6 796.2 Z"/>
+        <path fill="#fff" d="M168.6 829.2 L514.5 1037.5 L514.5 1085.2 L168.6 879 Z"/>
+        <path fill="#fff" d="M450 648.1 Q450 632.2 463.6 640.3 L619.5 733.6 Q632.6 741.4 619.5 749.1 L463.5 840.2 Q450 848.1 450 832.4 Z"/>
+      </svg>
+      <span className="font-semibold tracking-tight text-[19px] leading-none">Storm<span style={{ color: '#ff4e6b' }}>usic</span></span>
     </div>
   )
 }
@@ -89,7 +106,11 @@ export default function App() {
   const [tab, setTab] = useState<'home' | 'samples' | 'explore' | 'library'>('home')
   const [queue, setQueue] = useState<Track[]>([])
   const [idx, setIdx] = useState(0)
-  const [playing, setPlaying] = useState(false)
+  const [playerState, setPlayerState] = useState(initialPlayer)
+  const player = useRef<Player | null>(null)
+  const playing = playerState.status === 'playing'
+  const setPlaying = (value: boolean) => player.current?.intent(value)
+  const togglePlay = () => setPlaying(!player.current?.state.wantPlay)
   const [time, setTime] = useState(0)
   const [dur, setDur] = useState(0)
   const [full, setFull] = useState(false)
@@ -97,6 +118,16 @@ export default function App() {
   const [live, setLive] = useState(true)
   const [source, setSource] = useState('')
   const [toast, setToast] = useState('')
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [confirmOnboardingReset, setConfirmOnboardingReset] = useState(false)
+  const [undo, setUndo] = useState<{ message: string; action: () => void | Promise<void>; expires: number } | null>(null)
+  const undoBusy = useRef(false)
+  useEffect(() => {
+    if (!undo) return
+    const timer = setTimeout(() => setUndo(current => current === undo ? null : current), Math.max(0, undo.expires - Date.now()))
+    return () => clearTimeout(timer)
+  }, [undo])
+  const offerUndo = (message: string, action: () => void | Promise<void>) => setUndo({ message, action, expires: Date.now() + 8000 })
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<Track[]>([])
   const [searching, setSearching] = useState(false)
@@ -110,11 +141,20 @@ export default function App() {
   const [mix, setMix] = useState<MixT | null>(savedMix)
   const [mixBusy, setMixBusy] = useState(false)
   const [mixErr, setMixErr] = useState('')
-  const [, setTasteRev] = useState(0) // re-render after like/dislike
-  const listen = useRef<{ t: Track; sec: number; last: number; ended: boolean } | null>(null)
+  const [tasteRev, setTasteRev] = useState(0) // re-render after like/dislike
+  const listen = useRef<{ t: Track; sec: number; last: number; ended: boolean; suppressed?: boolean; recorded?: boolean } | null>(null)
   const extending = useRef(false)
   const [online, setOnline] = useState(() => navigator.onLine)
-  const [dl, setDl] = useState<Progress | null>(null)
+  const [library, setLibrary] = useState<ServerLibrary | null>(null)
+  const [libraryError, setLibraryError] = useState('')
+  const [libraryRev, setLibraryRev] = useState(0)
+  const dl = library?.summary.running ? library.summary : null
+  const currentDownload = library?.tracks.find(t => t.id === library.summary.currentId)
+  const dayPlan = useRef<DailyPlan | null>(load('ytm.dailyPlan', null))
+  const planning = useRef(false)
+  const planClock = useRef(0)
+  const latest = useRef({ profile, mix, online, idx, queue })
+  latest.current = { profile, mix, online, idx, queue }
   const [dlErr, setDlErr] = useState('')
   const [offRev, setOffRev] = useState(0) // re-render after offline cache changes
   const [storage, setStorage] = useState<{ used: number; quota: number; persisted: boolean } | null>(null)
@@ -129,30 +169,80 @@ export default function App() {
   const refreshStorage = () => { void storageInfo().then(setStorage) }
   useEffect(refreshStorage, [offRev])
 
-  const startDownload = useCallback((m: MixT | null, manual = false) => {
-    if (!m?.tracks.length || offlineState()?.at === m.at) return
-    if (!manual && !goodNetwork()) return
-    setDlErr('')
-    downloadMix(m, setDl).then(() => { setOffRev((r) => r + 1) }).catch((e) => setDlErr(e instanceof Error ? e.message : String(e))).finally(() => setDl(null))
+  const startDownload = useCallback(async (m: MixT | null, manual = false) => {
+    if (!m?.tracks.length) return
+    setDlErr(''); if (manual) localStorage.setItem('ytm.mirrorPaused', '0')
+    try { await sendPlan(m.tracks, manual || !dayPlan.current); if (manual) await libraryRequest('/run', 'POST'); setLibraryRev(r => r + 1) }
+    catch (e) { setDlErr(e instanceof Error ? e.message : 'Servidor indisponível.') }
   }, [])
-  // Auto-download the latest Supermix whenever it changes and the network allows it.
-  useEffect(() => { if (online) startDownload(mix) }, [mix?.at, online, startDownload])
 
   const refreshMix = useCallback(async (force = false) => {
-    if (!profile || mixBusy || (!force && !isStale(savedMix()))) return
-    setMixBusy(true); setMixErr('')
-    try { const m = await generateSupermix(profile, 25); if (m.tracks.length) setMix(m); else setMixErr('Poucas recomendações — ouça mais algumas faixas') }
-    catch (e) { setMixErr(e instanceof Error ? e.message : String(e)) }
-    finally { setMixBusy(false) }
-  }, [profile, mixBusy])
-  // Supermix renews every 12h (checked on open and every 10 min).
-  useEffect(() => { void refreshMix(); const t = setInterval(() => void refreshMix(), 600_000); return () => clearInterval(t) // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile])
+    const context = latest.current
+    if (!context.profile || planning.current || !navigator.onLine) return
+    if (!force && Date.now() - planClock.current < 30000) return
+    planning.current = true; planClock.current = Date.now(); setMixBusy(true); setMixErr('')
+    try {
+      const previous = dayPlan.current
+      let candidates = context.mix?.tracks || []
+      const remaining = buildPlan({ previous, events: tasteEvents(), candidates, now: Date.now() })
+      if (force || remaining.tracks.length < 25 || remaining.tracks.reduce((n, t) => n + knownDuration(t.ytId, t.dur), 0) < 7200) {
+        candidates = (await generateSupermix(context.profile, 40)).tracks
+      }
+      const plan = buildPlan({ previous, events: tasteEvents(), candidates: candidates.map(t => ({ ...t, dur: knownDuration(t.ytId, t.dur) })), now: Date.now() })
+      if (!plan.tracks.length) throw new Error('Ainda não há recomendações suficientes. Seu plano anterior foi preservado.')
+      dayPlan.current = plan; localStorage.setItem('ytm.dailyPlan', JSON.stringify(plan))
+      const m: MixT = { ...plan, kinds: {}, online: true }; localStorage.setItem('ytm.supermix', JSON.stringify(m)); setMix(m)
+      localStorage.setItem('ytm.planPending', '1')
+      await sendPlan(plan.tracks, !previous || force)
+      localStorage.setItem('ytm.planPending', '0'); setLibraryRev(r => r + 1)
+    } catch (e) { setMixErr(e instanceof Error ? e.message : 'Não foi possível atualizar o plano.') }
+    finally { planning.current = false; setMixBusy(false) }
+  }, [])
+  useEffect(() => {
+    if (!profile) return
+    const sync = async () => {
+      const previous = dayPlan.current
+      if (previous) {
+        try {
+          await sendPlan(previous.tracks, localStorage.getItem('ytm.planPending') === '1'); localStorage.setItem('ytm.planPending', '0')
+          const status: ServerLibrary = await (await libraryRequest()).json()
+          if (!status.summary.running && status.summary.done < status.summary.total) await libraryRequest('/run', 'POST')
+        } catch { /* Retry when reconnected. */ }
+      }
+      void refreshMix()
+    }
+    void sync()
+    const timer = setInterval(() => void refreshMix(), 1800000)
+    const hidden = () => { if (document.hidden) void refreshMix() }
+    addEventListener('online', sync); document.addEventListener('visibilitychange', hidden)
+    return () => { clearInterval(timer); removeEventListener('online', sync); document.removeEventListener('visibilitychange', hidden) }
+  }, [profile, refreshMix])
+  useEffect(() => { if (!tasteRev) return; const timer = setTimeout(() => void refreshMix(), 30000); return () => clearTimeout(timer) }, [tasteRev, refreshMix])
+  useEffect(() => {
+    let disposed = false, timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      if (document.hidden || disposed) return
+      let delay = 10000
+      try {
+        const data: ServerLibrary = await (await libraryRequest()).json()
+        if (disposed) return
+        setLibrary(data); setLibraryError(''); delay = data.summary.running ? 1000 : 10000
+        const planned = dayPlan.current?.tracks || latest.current.mix?.tracks || []
+        void mirrorLibrary(data.tracks, planned, () => !document.hidden && !['loading', 'buffering'].includes(player.current?.state.status || '')).catch(() => {})
+      } catch { if (!disposed) setLibraryError('Servidor parado. As faixas copiadas para o navegador continuam disponíveis.') }
+      if (!disposed) timer = setTimeout(poll, delay)
+    }
+    const visible = () => { clearTimeout(timer); if (!document.hidden) void poll() }
+    void poll(); document.addEventListener('visibilitychange', visible)
+    const offlineChanged = () => setOffRev(r => r + 1)
+    addEventListener('stormusic-offline', offlineChanged)
+    return () => { disposed = true; clearTimeout(timer); document.removeEventListener('visibilitychange', visible); removeEventListener('stormusic-offline', offlineChanged) }
+  }, [libraryRev])
 
   // Online search (debounced) via AudioFlow → YouTube Music "Songs" tab only.
   useEffect(() => {
     const term = q.trim()
-    if (term.length < 2) { setHits([]); setSearchErr(''); setSearching(false); return }
+    if (!online || libraryError || term.length < 2) { setHits([]); setSearchErr(''); setSearching(false); return }
     let off = false
     setSearching(true)
     const t = setTimeout(() => {
@@ -164,7 +254,7 @@ export default function App() {
         .finally(() => { if (!off) setSearching(false) })
     }, 400)
     return () => { off = true; clearTimeout(t) }
-  }, [q])
+  }, [q, online, libraryError])
 
   useEffect(() => { localStorage.setItem('ytm.fb', JSON.stringify(fb)) }, [fb])
   useEffect(() => { if (profile) localStorage.setItem('ytm.profile', JSON.stringify(profile)) }, [profile])
@@ -173,20 +263,25 @@ export default function App() {
   const preview = useMemo(() => {
     if (!profile) return []
     const base = mood === 'all' && mix?.tracks.length ? mix.tracks : buildBlock(profile, fb, mood, [], 12)
-    if (online) return base
+    if (online && !libraryError) return base
     // Offline: only what was downloaded is playable.
-    const st = offlineState()
-    return (offlineTracks().length ? offlineTracks() : mix?.tracks ?? []).filter((t) => st?.ids.includes(t.ytId))
+    const ids = new Set([...(offlineState()?.ids || []), ...(libraryError ? [] : library?.tracks.filter(t => t.status === 'done').map(t => t.id) || [])])
+    return [...new Map([...offlineTracks(), ...(mix?.tracks || [])].map(t => [t.ytId, t])).values()].filter(t => ids.has(t.ytId))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, mood, fb, mix, online, offRev])
-  const kindOf = (t: Track): 'fav' | 'disc' => (mood === 'all' && mix?.kinds[t.ytId]) || (profile && isKnown(t, profile, fb) ? 'fav' : 'disc')
+  }, [profile, mood, fb, mix, online, offRev, library, libraryError])
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(''), 1800) }
 
-  const startMix = useCallback((list?: Track[], at = 0) => { setQueue(list ?? preview); setIdx(at); setPlaying(true) }, [preview])
+  const startMix = useCallback((list?: Track[], at = 0) => {
+    const candidates = list ?? preview
+    const allowed = online && !libraryError ? candidates : candidates.filter(t => isOffline(t.ytId) || (!libraryError && library?.tracks.some(x => x.id === t.ytId && x.status === 'done')))
+    const selected = candidates[at]
+    if (!allowed.length || (selected && !allowed.some(t => t.ytId === selected.ytId))) { flash('Esta faixa ainda não está baixada.'); return }
+    setQueue(allowed); setIdx(Math.max(0, allowed.findIndex(t => t.ytId === selected?.ytId))); player.current?.intent(true, player.current.state.trackId !== selected?.ytId)
+  }, [preview, online, libraryError, library])
 
   // Playing a search result starts a radio built from it (YouTube Music algorithm, no variations).
   const playRadio = (t: Track) => {
-    if (!online) { flash('Sem conexão'); return }
+    if (!online || libraryError) { flash('Busca e rádio indisponíveis. Use as faixas baixadas.'); return }
     startMix([t], 0); flash('Rádio: ' + t.title)
     radioFrom(t, []).then((r) => setQueue((qq) => (qq[0]?.ytId === t.ytId ? [qq[0], ...r.tracks] : qq))).catch(() => {})
   }
@@ -194,7 +289,7 @@ export default function App() {
   // Mood change recalculates upcoming part of queue instantly
   const changeMood = (m: Mood | 'all') => {
     setMood(m)
-    if (profile && queue.length) { const head = queue.slice(0, idx + 1); setQueue([...head, ...buildBlock(profile, fb, m, head.map((t) => t.id))]) }
+    if (profile && queue.length && online && !libraryError) { const head = queue.slice(0, idx + 1); setQueue([...head, ...buildBlock(profile, fb, m, head.map((t) => t.id))]) }
     flash('Supermix recalculado: ' + MOODS.find((x) => x.id === m)!.label)
   }
 
@@ -204,30 +299,42 @@ export default function App() {
       ? { ...fb, liked: fb.liked.includes(cur.id) ? fb.liked.filter((x) => x !== cur.id) : [...fb.liked, cur.id], disliked: fb.disliked.filter((x) => x !== cur.id) }
       : { ...fb, disliked: [...new Set([...fb.disliked, cur.id])], liked: fb.liked.filter((x) => x !== cur.id) }
     setFb(nf)
-    record(cur, kind === 'like' && isLiked(cur.ytId) ? 'unlike' : kind)
+    const undoSignal = record(cur, kind === 'like' && isLiked(cur.ytId) ? 'unlike' : kind)
     setTasteRev((r) => r + 1)
     const head = queue.slice(0, idx + 1)
     if (mood !== 'all') setQueue([...head, ...buildBlock(profile, nf, mood, head.map((t) => t.id))])
     else if (kind === 'dislike') setQueue([...head, ...queue.slice(idx + 1).filter((t) => t.artist !== cur.artist)])
     flash(kind === 'like' ? 'Mais faixas como esta no Supermix' : 'Entendido — removendo faixas parecidas')
-    if (kind === 'dislike') setIdx((i) => i + 1)
+    if (kind === 'like') {
+      const id = cur.id
+      const wasLiked = fb.liked.includes(id), wasDisliked = fb.disliked.includes(id)
+      offerUndo(wasLiked ? 'Curtida removida' : 'Curtida adicionada', () => {
+        undoSignal()
+        setFb(current => ({ ...current,
+          liked: [...current.liked.filter(x => x !== id), ...(wasLiked ? [id] : [])],
+          disliked: [...current.disliked.filter(x => x !== id), ...(wasDisliked ? [id] : [])],
+        }))
+        setTasteRev(r => r + 1)
+      })
+    }
+    if (kind === 'dislike') { if (listen.current) listen.current.suppressed = true; setIdx((i) => i + 1) }
   }
 
   const next = useCallback(() => {
     if (!profile) return
     setIdx((i) => {
-      if (i + 1 >= queue.length) setQueue((qq) => [...qq, ...buildBlock(profile, fb, mood, qq.slice(-15).map((t) => t.id))]) // safety net
+      if (i + 1 >= queue.length && online && !libraryError) setQueue((qq) => [...qq, ...buildBlock(profile, fb, mood, qq.slice(-15).map((t) => t.id))]) // safety net
       return i + 1
     })
-  }, [profile, fb, mood, queue.length])
+  }, [profile, fb, mood, queue.length, online, libraryError])
   const prev = () => { if (audio.current && audio.current.currentTime > 3) audio.current.currentTime = 0; else setIdx((i) => Math.max(0, i - 1)) }
 
   // Infinite queue: extend from what is being enjoyed now (online), else from the local engine.
   useEffect(() => {
     if (!profile || !queue.length || idx + 4 < queue.length || extending.current) return
-    if (!online) {
+    if (!online || libraryError) {
       // Offline: loop through downloaded tracks only.
-      const st = offlineState(); const pool = (offlineTracks().length ? offlineTracks() : mix?.tracks ?? []).filter((t) => st?.ids.includes(t.ytId))
+      const pool = preview
       if (pool.length) setQueue((qq) => [...qq, ...pool.sort(() => Math.random() - 0.5)])
       return
     }
@@ -235,49 +342,65 @@ export default function App() {
     const snapshot = queue
     ;(mood === 'all' ? extend(snapshot, profile).then((r) => r.tracks) : Promise.reject())
       .catch(() => buildBlock(profile, fb, mood, snapshot.slice(-15).map((t) => t.id)))
-      .then((add) => setQueue((qq) => [...qq, ...add.filter((t) => !qq.some((x) => x.ytId === t.ytId))]))
+      .then((add) => setQueue((qq) => qq === snapshot ? [...qq, ...add.filter((t) => !qq.some((x) => x.ytId === t.ytId))] : qq))
       .finally(() => { extending.current = false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idx, queue.length])
 
-  // Resolve ad-free stream for current track
+  const callbacks = useRef({ next, cur })
+  callbacks.current = { next, cur }
   useEffect(() => {
-    // Close the previous listen: >=30s or finished = liked signal, <30s = skip.
+    const engine = new Player({
+      state: setPlayerState,
+      time: (ct, duration) => {
+        setTime(ct); if (Number.isFinite(duration) && duration > 0) setDur(duration)
+        const l = listen.current
+        if (l) {
+          const delta = ct - l.last; if (delta > 0 && delta < 2) l.sec += delta; l.last = ct
+          if (l.sec >= 30 && !l.recorded && !l.suppressed) { recordPlayback(l.t, l.sec, false); l.recorded = true; setTasteRev(r => r + 1) }
+        }
+      },
+      ended: () => { const a = player.current?.audio; if (listen.current && a && Number.isFinite(a.duration) && a.duration - a.currentTime <= 0.3) listen.current.ended = true; callbacks.current.next() },
+      warning: message => { setSource(message); setToast(message) },
+      source: value => {
+        setSource(value.source); const track = callbacks.current.cur
+        if (track && value.duration) rememberDuration(track.ytId, value.duration, track)
+        setDur(value.duration || (track ? knownDuration(track.ytId, track.dur) : 0))
+        audio.current = engine.audio
+      },
+    })
+    player.current = engine; audio.current = engine.audio
+    return () => { engine.destroy(); player.current = null }
+  }, [])
+  useEffect(() => {
     const l = listen.current
-    if (l && l.t.ytId !== cur?.ytId) recordPlayback(l.t, l.sec, l.ended)
-    if (!cur) return
-    if (listen.current?.t.ytId !== cur.ytId) listen.current = { t: cur, sec: 0, last: 0, ended: false }
-    let off = false
-    setSource('Resolvendo stream…'); setTime(0)
-    setFb((f) => ({ ...f, played: [...f.played.slice(-40), cur.id] }))
-    resolveAudio(cur.ytId, TRACKS.indexOf(cur), live, (st) => { if (!off) setSource(st) }).then((r) => {
-      if (off || !audio.current) return
-      if (r.duration) { rememberDuration(cur.ytId, r.duration, cur); cur.dur = r.duration }
-      setSource(r.source); setDur(r.duration ?? knownDuration(cur.ytId, cur.dur)); audio.current.src = r.url
-      if (playing) audio.current.play().catch(() => setPlaying(false))
-    }).catch((e) => { if (off) return; setSource(e instanceof Error ? e.message : String(e)); setPlaying(false) })
-    prefetch(queue.slice(idx + 1, idx + 3).map((t) => ({ ytId: t.ytId, idx: TRACKS.indexOf(t) })), live)
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.artist, album: cur.sub, artwork: [{ src: thumb(cur), sizes: '480x360', type: 'image/jpeg' }] })
-    }
-    return () => { off = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cur?.id, idx])
-
+    if (l && !l.recorded && !l.suppressed) { recordPlayback(l.t, l.sec, l.ended); if (l.sec >= 1 || l.ended) setTasteRev(r => r + 1) }
+    listen.current = cur ? { t: cur, sec: 0, last: 0, ended: false } : null
+    if (!cur) { player.current?.intent(false); return }
+    setSource('Preparando áudio…'); setTime(0)
+    setFb(f => ({ ...f, played: [...f.played.slice(-40), cur.id] }))
+    void player.current?.load(cur.ytId, () => resolveAudio(cur.ytId, TRACKS.indexOf(cur), live))
+    if (online && !libraryError) prefetch(queue.slice(idx + 1, idx + 4).map(t => ({ ytId: t.ytId, idx: TRACKS.indexOf(t) })), live)
+    if ('mediaSession' in navigator) navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.artist, album: cur.sub, artwork: [{ src: thumb(cur), sizes: '480x360', type: 'image/jpeg' }] })
+  }, [cur?.ytId, idx])
+  const upcoming = queue[idx + 1]
+  useEffect(() => {
+    if (!upcoming) return
+    const local = isOffline(upcoming.ytId) || library?.tracks.some(t => t.id === upcoming.ytId && t.status === 'done')
+    if (local || (dur > 0 && (time / dur >= 0.4 || dur - time <= 30))) void player.current?.prepare(upcoming.ytId, () => resolveAudio(upcoming.ytId, TRACKS.indexOf(upcoming), live, undefined, 'prefetch'))
+  }, [upcoming?.ytId, time, dur, library])
   useEffect(() => {
     if (!('mediaSession' in navigator)) return
     navigator.mediaSession.setActionHandler('nexttrack', next)
     navigator.mediaSession.setActionHandler('previoustrack', prev)
     navigator.mediaSession.setActionHandler('play', () => setPlaying(true))
     navigator.mediaSession.setActionHandler('pause', () => setPlaying(false))
+    navigator.mediaSession.setActionHandler('seekto', details => { if (audio.current && details.seekTime !== undefined) audio.current.currentTime = details.seekTime })
   })
-
-  useEffect(() => { const a = audio.current; if (!a || !a.src) return; if (playing) a.play().catch(() => {}); else a.pause() }, [playing])
 
   if (!profile) return <div className="h-full max-w-[480px] mx-auto"><Onboarding onDone={(p) => setProfile(p)} /></div>
 
   const liked = likedTracks()
-  const lyrics = cur ? [`♪ ${cur.title} ♪`, '', 'Letras sincronizadas indisponíveis offline.', `Interpretada por ${cur.artist}`, '', 'Sinta o ritmo, deixa o som te levar', 'Cada batida é um passo a mais', 'No Supermix que é só seu', 'Sem pausas, sem anúncios, só música', '', `(${cur.genre} · ${cur.sub})`] : []
   const pct = dur ? (time / dur) * 100 : 0
 
   const Mix = ({ size = 'lg' }: { size?: 'lg' }) => (
@@ -296,16 +419,15 @@ export default function App() {
     </button>
   )
 
-  const filtered = TRACKS.filter((t) => (t.title + t.artist + t.genre).toLowerCase().includes(q.toLowerCase()))
+  const filtered = [...new Map([...TRACKS, ...offlineTracks(), ...(mix?.tracks || [])].map(t => [t.ytId, t])).values()].filter((t) => (t.title + t.artist + t.genre).toLowerCase().includes(q.toLowerCase()))
 
   return (
     <div className="h-full max-w-[480px] mx-auto relative bg-[#030303] overflow-hidden flex flex-col">
-      <audio ref={audio} preload="auto" onTimeUpdate={(e) => { const ct = e.currentTarget.currentTime; setTime(ct); const l = listen.current; if (l) { const d = ct - l.last; if (d > 0 && d < 2) l.sec += d; l.last = ct } }} onLoadedMetadata={(e) => { const d = e.currentTarget.duration; if (isFinite(d) && d > 0) { setDur(d); if (cur) rememberDuration(cur.ytId, d, cur) } }} onEnded={() => { if (listen.current) listen.current.ended = true; next() }} onError={() => { if (source.startsWith('Resolv')) return; if (cur) invalidate(cur.ytId); listen.current = null; setPlaying(false); setSource('Falha na reprodução. Tente novamente ou troque de rede.') }} />
 
       <header className="pt-safe sticky top-0 z-20 bg-[#030303]/95 backdrop-blur">
         <div className="h-14 px-4 flex items-center justify-between">
           <Logo />
-          <div className="flex items-center gap-5 text-white/90"><Cast size={22} /><Search size={22} onClick={() => setTab('explore')} /><button onClick={() => { localStorage.clear(); location.reload() }} className="w-7 h-7 rounded-full bg-[#7c3aed] text-xs font-bold">EU</button></div>
+          <div className="flex items-center gap-5 text-white/90"><Search size={22} onClick={() => setTab('explore')} /><button aria-label="Abrir perfil" onClick={() => setProfileOpen(true)} className="w-7 h-7 rounded-full bg-[#7c3aed] text-xs font-bold">EU</button></div>
         </div>
         {tab === 'home' && (
           <div className="flex gap-2 px-4 pb-3 overflow-x-auto no-scrollbar">{MOODS.map((m) => <button key={m.id} onClick={() => changeMood(m.id)} className={`shrink-0 h-8 px-3 rounded-lg text-sm transition ${mood === m.id ? 'bg-white text-black font-medium' : 'bg-white/10'}`}>{m.label}</button>)}</div>
@@ -315,9 +437,11 @@ export default function App() {
       <main className="flex-1 overflow-y-auto no-scrollbar px-4 pb-40">
         {tab === 'home' && (<>
           <Mix />
+          <button onClick={() => setTab('library')} className="mt-3 text-sm underline">Baixadas · {library?.summary.done || 0} faixas · {Math.floor(library?.summary.minutes || 0)} min</button>
+          {libraryError && <p className="mt-2 text-xs text-amber-300">{libraryError}</p>}
           <div className="flex items-center gap-2 mt-2 text-[11px] text-white/50">
             {mixBusy ? <><RefreshCw size={12} className="animate-spin" /> Gerando seu Supermix com base no seu gosto…</>
-              : mix ? <>Gerado {ago(mix.at)} · renova em {Math.max(1, Math.ceil((mix.at + REFRESH_MS - Date.now()) / 3600_000))}h · 80% favoritos / 20% descobertas</>
+              : mix ? <>Plano atualizado {ago(mix.at)} · {mix.tracks.length} faixas</>
               : <>{mixErr ? `Supermix online indisponível: ${mixErr}` : 'Supermix local'}</>}
             <button disabled={mixBusy} onClick={() => void refreshMix(true)} className="ml-auto h-7 px-3 rounded-full bg-white/10 text-white/80 flex items-center gap-1 disabled:opacity-40"><RefreshCw size={12} /> Atualizar</button>
           </div>
@@ -325,10 +449,10 @@ export default function App() {
           {!online && <div className="mt-3 rounded-xl bg-white/[.06] px-3 py-2.5 flex items-center gap-2 text-sm"><CloudOff size={16} className="text-amber-300" /> Sem conexão · tocando {preview.length} faixas baixadas</div>}
           <div className="mt-3 rounded-xl bg-white/[.06] px-3 py-2.5">
             {dl ? (<>
-              <div className="flex items-center gap-2 text-sm"><Download size={16} className="animate-pulse" /> Baixando {dl.done}/{dl.total}{dl.failed ? ` · ${dl.failed} falharam` : ''}</div>
+              <div className="flex items-center gap-2 text-sm"><Download size={16} className="animate-pulse" /> Baixando {dl.done}/{dl.total} · {currentDownload?.title || 'Preparando'} {currentDownload?.percent || 0}%{dl.failed ? ` · ${dl.failed} falharam` : ''}</div>
               <div className="h-1 mt-2 rounded-full bg-white/15 overflow-hidden"><div className="h-full transition-all" style={{ width: `${(dl.done / Math.max(1, dl.total)) * 100}%`, background: RED }} /></div>
             </>) : offlineState() && offlineState()!.at === mix?.at ? (
-              <div className="flex items-center gap-2 text-sm"><CheckCircle2 size={16} className="text-emerald-400" /> Disponível offline · {offlineState()!.ids.length} faixas</div>
+              <div className="flex items-center gap-2 text-sm"><CheckCircle2 size={16} className="text-emerald-400" /> Disponível no disco · {library?.summary.done} faixas</div>
             ) : (
               <div className="flex items-center gap-2 text-sm">
                 <Download size={16} className="text-white/60" />
@@ -338,7 +462,7 @@ export default function App() {
             )}
           </div>
           <h2 className="text-xl font-bold mt-6 mb-2">Próximas no Supermix</h2>
-          {preview.slice(0, 8).map((t, i) => <Row key={t.id} t={t} onPlay={() => startMix(preview, i)} right={<span className="flex items-center gap-1.5">{isOffline(t.ytId) && <CheckCircle2 size={14} className="text-emerald-400" aria-label="Baixada" />}<span className={`text-[10px] px-2 py-0.5 rounded-full ${kindOf(t) === 'fav' ? 'bg-white/10 text-white/70' : 'bg-[#ff0033]/20 text-[#ff6b85]'}`}>{kindOf(t) === 'fav' ? 'Favorito' : 'Descoberta'}</span></span>} />)}
+          {preview.slice(0, 8).map((t, i) => <Row key={t.id} t={t} onPlay={() => startMix(preview, i)} right={<span className="flex items-center gap-1.5">{isOffline(t.ytId) && <CheckCircle2 size={14} className="text-emerald-400" aria-label="Baixada" />}</span>} />)}
           {GENRES.filter((g) => profile.genres.includes(g.id)).map((g) => (
             <section key={g.id} className="mt-7">
               <div className="text-xs text-white/50 uppercase tracking-widest">Mix</div><h2 className="text-xl font-bold mb-3">{g.label}</h2>
@@ -359,13 +483,13 @@ export default function App() {
         )}
 
         {tab === 'explore' && (<>
-          <div className="flex items-center gap-2 h-11 px-4 rounded-full bg-white/10 mt-2"><Search size={18} className="text-white/60" /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Pesquisar músicas, artistas" className="bg-transparent outline-none flex-1 text-[15px]" /></div>
+          <div className="flex items-center gap-2 h-11 px-4 rounded-full bg-white/10 mt-2"><Search size={18} className="text-white/60" /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder={online && !libraryError ? 'Pesquisar músicas, artistas' : 'Pesquisar nas baixadas'} className="bg-transparent outline-none flex-1 text-[15px]" /></div>
           {q ? <div className="mt-3">
             {filtered.length > 0 && <><h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mb-1">Na sua biblioteca</h2>
               {filtered.map((t, i) => <Row key={t.id} t={t} onPlay={() => startMix(filtered, i)} />)}</>}
             <h2 className="text-sm font-semibold text-white/60 uppercase tracking-wider mt-4 mb-1 flex items-center gap-2">Músicas · YouTube Music {searching && <RefreshCw size={12} className="animate-spin" />}</h2>
             {hits.map((t, i) => <Row key={t.id} t={t} active={cur?.ytId === t.ytId} onPlay={() => playRadio(t)} />)}
-            {!searching && !hits.length && <div className="text-sm text-white/50 py-3">{searchErr || (q.trim().length < 2 ? 'Digite ao menos 2 letras' : 'Nenhuma música encontrada')}</div>}
+            {!searching && !hits.length && <div className="text-sm text-white/50 py-3">{searchErr || ((!online || libraryError) ? 'Busca online indisponível' : q.trim().length < 2 ? 'Digite ao menos 2 letras' : 'Nenhuma música encontrada')}</div>}
           </div> : (<>
             <h2 className="text-xl font-bold mt-6 mb-3">Humor e gêneros</h2>
             <div className="grid grid-cols-2 gap-2">{GENRES.map((g) => <button key={g.id} onClick={() => { const l = TRACKS.filter((t) => t.genre === g.id); startMix(l) }} className="h-14 rounded-lg bg-white/[.08] text-left px-3 text-sm font-medium border-l-4" style={{ borderColor: g.color }}>{g.label}</button>)}</div>
@@ -375,20 +499,21 @@ export default function App() {
         </>)}
 
         {tab === 'library' && (<>
-          <div className="flex gap-2 pt-2">{['Playlists', 'Músicas', 'Artistas'].map((c) => <span key={c} className="h-8 px-3 rounded-lg bg-white/10 text-sm grid place-items-center">{c}</span>)}</div>
+          <Downloads data={library} error={libraryError} refresh={() => setLibraryRev(r => r + 1)} play={t => startMix([hitToTrack({ ...t, duration: t.duration })])} />
+
           <div onClick={() => liked.length && startMix(liked)} className="flex items-center gap-3 mt-4 py-2"><div className="w-14 h-14 rounded bg-gradient-to-br from-[#ff0033] to-[#7c3aed] grid place-items-center"><ThumbsUp size={22} fill="#fff" /></div><div><div className="font-medium">Músicas curtidas</div><div className="text-sm text-white/60">{liked.length} faixas</div></div></div>
           <div onClick={() => startMix()} className="flex items-center gap-3 py-2"><div className="w-14 h-14 rounded bg-white/10 grid place-items-center"><Sparkles size={22} color={RED} /></div><div><div className="font-medium">Supermix</div><div className="text-sm text-white/60">{mix ? `Atualizado ${ago(mix.at)}` : 'Local'}</div></div></div>
           <h2 className="text-lg font-bold mt-5 mb-1">Sua árvore de interesses</h2>
           <div className="flex flex-wrap gap-1.5 text-xs">{[...profile.genres.map((g) => GENRES.find((x) => x.id === g)!.label), ...profile.subs, ...profile.artists].map((x) => <span key={x} className="px-2.5 py-1 rounded-full bg-white/10">{x}</span>)}</div>
           <div className="text-xs text-white/50 mt-3">{fb.liked.length} gostei · {fb.disliked.length} não gostei · {fb.played.length} reproduções</div>
-          <button onClick={() => setProfile(null)} className="mt-3 text-sm h-9 px-4 rounded-full border border-white/20 flex items-center gap-2"><RefreshCw size={14} /> Refazer onboarding</button>
+          <button onClick={() => setConfirmOnboardingReset(true)} className="mt-3 text-sm h-9 px-4 rounded-full border border-white/20 flex items-center gap-2"><RefreshCw size={14} /> Refazer onboarding</button>
           <h2 className="text-lg font-bold mt-6 mb-1">Offline e app</h2>
           <div className="rounded-xl bg-white/[.06] p-3 space-y-2 text-sm">
             <div className="flex justify-between text-white/70"><span>Espaço usado</span><span>{storage ? `${(storage.used / 1048576).toFixed(0)} MB${storage.quota ? ` de ${(storage.quota / 1073741824).toFixed(1)} GB` : ''}` : '—'}</span></div>
             <div className="flex justify-between text-white/70"><span>Faixas offline</span><span>{offlineState()?.ids.length ?? 0}</span></div>
             <div className="flex justify-between text-white/70"><span>Armazenamento persistente</span><span>{storage?.persisted ? 'Sim' : 'Não'}</span></div>
             <div className="flex gap-2 pt-1">
-              <button onClick={async () => { await clearOffline(); setOffRev((r) => r + 1); flash('Offline limpo') }} className="h-9 px-4 rounded-full border border-white/20 flex items-center gap-2"><Trash2 size={14} /> Limpar offline</button>
+              <button onClick={() => setProfileOpen(true)} className="h-9 px-4 rounded-full border border-white/20 flex items-center gap-2"><Trash2 size={14} /> Limpar cópia do navegador</button>
               {installEvt && <button onClick={async () => { await installEvt.prompt(); setInstallEvt(null) }} className="h-9 px-4 rounded-full bg-white text-black font-medium flex items-center gap-2"><Smartphone size={14} /> Instalar app</button>}
             </div>
           </div>
@@ -428,7 +553,27 @@ export default function App() {
         </>)}
       </main>
 
-      {toast && <div className="absolute left-1/2 -translate-x-1/2 bottom-[calc(140px+env(safe-area-inset-bottom))] z-40 bg-white text-black text-sm px-4 py-2 rounded-lg shadow-xl whitespace-nowrap">{toast}</div>}
+      {toast && !undo && <div role="status" className="absolute left-1/2 -translate-x-1/2 bottom-[calc(140px+env(safe-area-inset-bottom))] z-40 bg-white text-black text-sm px-4 py-2 rounded-lg shadow-xl whitespace-nowrap">{toast}</div>}
+      {undo && <div role="status" className="absolute left-4 right-4 bottom-[calc(140px+env(safe-area-inset-bottom))] z-[60] flex items-center justify-between gap-3 rounded-xl bg-white p-4 text-sm text-black shadow-xl">
+        <span>{undo.message}</span><button className="rounded-lg p-2 font-bold underline" onClick={async () => {
+          if (undoBusy.current || Date.now() >= undo.expires) return
+          undoBusy.current = true
+          try { await undo.action(); setUndo(current => current === undo ? null : current); flash('Ação desfeita') }
+          catch (e) { flash(e instanceof Error ? e.message : 'Não foi possível desfazer.'); setUndo(current => current === undo ? null : current) }
+          finally { undoBusy.current = false }
+        }}>Desfazer</button>
+      </div>}
+      {confirmOnboardingReset && <Confirm title="Refazer onboarding" message="O perfil atual será salvo em backup por sete dias. O app abrirá as escolhas de perfil; curtidas, histórico e downloads serão mantidos." onCancel={() => setConfirmOnboardingReset(false)} onConfirm={async () => {
+        backupTaste()
+        setConfirmOnboardingReset(false)
+        setProfile(null)
+      }} />}
+      {profileOpen && <ProfilePanel likes={new Set([...fb.liked, ...liked.map(t => t.id)]).size} locked={!!dl || mixBusy} onClose={() => setProfileOpen(false)} onUndo={offerUndo} onChanged={() => {
+        setFb(load('ytm.fb', { liked: [], disliked: [], played: [] }))
+        const restored = load<Profile | null>('ytm.profile', null)
+        if (JSON.stringify(restored) !== JSON.stringify(profile)) setProfile(restored)
+        setTasteRev(r => r + 1); setOffRev(r => r + 1)
+      }} />}
 
       <div className="absolute bottom-0 inset-x-0 z-30">
         {cur && (
@@ -438,7 +583,7 @@ export default function App() {
               <div className="flex-1 min-w-0"><div className="text-sm truncate">{cur.title}</div><div className="text-xs text-white/60 truncate">{cur.artist}</div></div>
               <button onClick={(e) => { e.stopPropagation(); react('dislike') }} className="p-2"><ThumbsDown size={20} /></button>
               <button onClick={(e) => { e.stopPropagation(); react('like') }} className="p-2"><ThumbsUp size={20} fill={isLiked(cur.ytId) ? '#fff' : 'none'} /></button>
-              <button onClick={(e) => { e.stopPropagation(); setPlaying(!playing) }} className="p-2">{playing ? <Pause size={24} fill="#fff" /> : <Play size={24} fill="#fff" />}</button>
+              <button onClick={(e) => { e.stopPropagation(); togglePlay() }} className="p-2">{playing ? <Pause size={24} fill="#fff" /> : <Play size={24} fill="#fff" />}</button>
               <button onClick={(e) => { e.stopPropagation(); next() }} className="p-2 pr-1"><SkipForward size={22} fill="#fff" /></button>
             </div>
             <div className="h-0.5 bg-white/20"><div className="h-full bg-white" style={{ width: pct + '%' }} /></div>
@@ -455,11 +600,11 @@ export default function App() {
       {full && cur && (
         <div className="absolute inset-0 z-50 slide-up flex flex-col pt-safe pb-safe" style={{ background: 'linear-gradient(180deg,#3a1a22 0%,#121212 55%,#030303 100%)' }}>
           <div className="h-14 px-4 flex items-center justify-between"><button onClick={() => { setFull(false); setPanel(null) }}><ChevronDown size={28} /></button>
-            <div className="flex bg-black/40 rounded-full p-1 text-xs"><span className="px-3 py-1 rounded-full bg-white/15">Música</span><span className="px-3 py-1 text-white/60">Vídeo</span></div><Cast size={22} /></div>
+            <div className="flex bg-black/40 rounded-full p-1 text-xs"><span className="px-3 py-1 rounded-full bg-white/15">Música</span></div></div>
           {panel ? (
             <div className="flex-1 overflow-y-auto no-scrollbar px-5">
-              {panel === 'lyrics' ? lyrics.map((l, i) => <p key={i} className={`text-2xl font-bold leading-snug min-h-4 ${i === Math.floor((time / (dur || 1)) * lyrics.length) ? 'text-white' : 'text-white/35'}`}>{l}</p>) :
-                <>{queue.slice(idx).map((t, i) => <Row key={t.id + i} t={t} active={i === 0} onPlay={() => setIdx(idx + i)} right={!isKnown(t, profile, fb) && <span className="text-[10px] text-[#ff6b85]">novo</span>} />)}<div className="text-center text-xs text-white/40 py-4">Fila infinita — novos blocos são gerados automaticamente</div></>}
+              {panel === 'lyrics' ? <p className="py-6 text-white/60">Letra indisponível para esta faixa.</p> :
+                <>{queue.slice(idx).map((t, i) => <Row key={t.id + i} t={t} active={i === 0} onPlay={() => setIdx(idx + i)}  />)}<div className="text-center text-xs text-white/40 py-4">Fila infinita — novos blocos são gerados automaticamente</div></>}
             </div>
           ) : (
             <div className="flex-1 flex items-center justify-center px-6"><img src={thumb(cur)} className="w-full aspect-square object-cover rounded-lg shadow-2xl" /></div>
@@ -471,18 +616,18 @@ export default function App() {
             <div className="flex gap-2 mt-3">
               <button onClick={() => react('dislike')} className="h-9 px-4 rounded-full bg-white/10 flex items-center gap-2 text-sm"><ThumbsDown size={16} /> Não gostei</button>
               <button onClick={() => react('like')} className={`h-9 px-4 rounded-full flex items-center gap-2 text-sm ${isLiked(cur.ytId) ? 'bg-white text-black' : 'bg-white/10'}`}><ThumbsUp size={16} fill={isLiked(cur.ytId) ? '#000' : 'none'} /> Gostei</button>
-              <button className="h-9 px-3 rounded-full bg-white/10"><Heart size={16} /></button>
+
             </div>
             <input type="range" className="yt w-full mt-5" min={0} max={dur || 1} step={0.5} value={time} style={{ ['--p' as string]: pct + '%' }} onChange={(e) => { if (audio.current) audio.current.currentTime = +e.target.value }} />
             <div className="flex justify-between text-xs text-white/50 mt-1"><span>{fmt(time)}</span><span className="truncate mx-2 text-emerald-300/70">{source}</span><span>{fmt(dur || cur.dur)}</span></div>
             <div className="flex items-center justify-between mt-3">
-              <Shuffle size={22} className="text-white/70" /><button onClick={prev}><SkipBack size={32} fill="#fff" /></button>
-              <button onClick={() => setPlaying(!playing)} className="w-[72px] h-[72px] rounded-full bg-white grid place-items-center">{playing ? <Pause size={32} fill="#000" color="#000" /> : <Play size={32} fill="#000" color="#000" className="ml-1" />}</button>
-              <button onClick={next}><SkipForward size={32} fill="#fff" /></button><Repeat size={22} className="text-white/70" />
+              <button onClick={prev}><SkipBack size={32} fill="#fff" /></button>
+              <button onClick={() => togglePlay()} className="w-[72px] h-[72px] rounded-full bg-white grid place-items-center">{playing ? <Pause size={32} fill="#000" color="#000" /> : <Play size={32} fill="#000" color="#000" className="ml-1" />}</button>
+              <button onClick={next}><SkipForward size={32} fill="#fff" /></button>
             </div>
             <div className="flex justify-around mt-5 mb-3 text-sm font-medium">
               {(['queue', 'lyrics'] as const).map((p) => <button key={p} onClick={() => setPanel(panel === p ? null : p)} className={`flex items-center gap-1.5 ${panel === p ? 'text-white' : 'text-white/50'}`}>{p === 'queue' ? <><ListMusic size={16} /> A seguir</> : 'Letra'}</button>)}
-              <span className="text-white/50">Relacionado</span>
+
             </div>
           </div>
         </div>

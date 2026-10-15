@@ -1,0 +1,13 @@
+Stormusic - kit de marca (feito a partir da logo enviada: hexagono vermelho #E50C16 com listras e play)
+
+Onde colocar (sobrescrever os arquivos atuais, mesmos nomes):
+  favicon.svg, pwa-192.png, pwa-512.png, pwa-maskable-512.png, apple-touch-icon.png  ->  public/
+  logo-mark.svg                                                                      ->  public/ (uso opcional)
+  Logo.snippet.tsx  ->  o conteudo substitui a funcao Logo() em src/App.tsx
+
+Tambem trocar o nome "Music" por "Stormusic" em vite.config.ts (manifest: name e short_name) e no titulo da pagina.
+
+Versao principal: listras e triangulo BRANCOS (igual ao arquivo original, logo-original.png).
+Alternativa: pasta alternativa-espaco-negativo/ (listras e triangulo vazados, o fundo escuro aparece por dentro).
+Para usar a alternativa, copie os arquivos dessa pasta no lugar dos da raiz. Os nomes sao os mesmos.
+O icone instalado so muda depois de reinstalar o PWA no Chrome.

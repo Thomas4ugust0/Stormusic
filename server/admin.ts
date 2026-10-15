@@ -1,3 +1,4 @@
+import { resetResolver } from './resolver.ts'
 import { mkdir, readFile, rename, writeFile, access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -36,7 +37,7 @@ export async function getVersion(force = false) {
 export async function healthStatus() {
   await load()
   const ytdlp_version = await getVersion()
-  return { status: ytdlp_version ? 'ok' : 'degraded', js_runtime: `node ${process.versions.node}`, ...state, ytdlp_version }
+  return { status: ytdlp_version ? 'ok' : 'degraded', js_runtime: `node ${process.versions.node}`, ...state, state: lock ? 'running' : state.state, ytdlp_version }
 }
 async function updateYtdlp() {
   const pip = process.env.RELAY_PIP || 'pip'
@@ -92,7 +93,7 @@ export async function startUpdate(target: 'app' | 'ytdlp', restart: () => void =
   state = { ...state, state: 'running', target, message: target === 'app' ? 'Atualizando o app…' : 'Atualizando yt-dlp…' }
   try { await persist() } catch { lock = false; state.state = 'failed'; throw new ApiError('state_unavailable', 'Não foi possível salvar o estado da atualização.', 500) }
   void (async () => {
-    try { if (target === 'app') await updateApp(restart); else await updateYtdlp(); await persist() }
+    try { if (target === 'app') await updateApp(restart); else { await updateYtdlp(); resetResolver() } await persist() }
     catch { state = { ...state, state: 'failed', message: 'Falha ao salvar a atualização.' } }
     finally { lock = false }
   })()

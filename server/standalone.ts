@@ -1,3 +1,4 @@
+import { startScheduler } from './scheduler.ts'
 import { createServer } from 'node:http'
 import { createReadStream } from 'node:fs'
 import { stat, realpath } from 'node:fs/promises'
@@ -43,5 +44,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   createApp().listen(port, host, () => {
     console.log('Stormusic: http://localhost:' + port)
     void autoUpdate()
+    void startScheduler()
   })
 }

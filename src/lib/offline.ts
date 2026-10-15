@@ -1,8 +1,9 @@
 // Offline Supermix: whole audio files stored in Cache Storage (`mix-<at>`).
-// Only the most recent mix is kept; older caches are dropped once the new one finishes.
+// Older audio remains until the user confirms cleanup in Profile.
 import { fetchAudioBlob } from './stream'
 import { knownDuration, rememberDuration, type Mix } from './taste'
 import type { Track } from './data'
+import { resetBusy } from './safety'
 
 const KEY = 'ytm.offlineMix'
 const PREFIX = 'mix-'
@@ -55,11 +56,12 @@ export async function storageInfo(): Promise<{ used: number; quota: number; pers
 let running: Promise<void> | null = null
 
 export function downloadMix(mix: Mix, onProgress: (p: Progress) => void): Promise<void> {
+  if (resetBusy()) return Promise.reject(new Error('Aguarde a limpeza ou restauração terminar.'))
   if (running) return running
   running = run(mix, onProgress).finally(() => { running = null })
   return running
 }
-export const downloading = () => running !== null
+export const downloading = () => running !== null || copying
 
 async function run(mix: Mix, onProgress: (p: Progress) => void) {
   if (!supported()) throw new Error('Cache Storage indisponível neste navegador')
@@ -88,13 +90,14 @@ async function run(mix: Mix, onProgress: (p: Progress) => void) {
           const existing = await cache.match(path(id))
           const blob = existing ? await existing.blob() : await fetchAudioBlob(id)
           track.dur = knownDuration(id, track.dur)
-          await cacheCovers(id)
-          await cache.put(path(id), new Response(blob, { headers: { 'Content-Type': blob.type || 'audio/mp4', 'Content-Length': String(blob.size) } }))
+          if (!existing) await cache.put(path(id), new Response(blob, { headers: { 'Content-Type': blob.type || 'audio/mp4', 'Content-Length': String(blob.size) } }))
           saved = true
         } catch { /* retry */ }
       }
       if (saved) ok.push(id); else failed++
       report()
+      // Artwork is optional: never repeat or reject saved audio because a cover failed.
+      if (saved) await cacheCovers(id).catch(() => {})
     }
   }
   await Promise.all([worker(), worker()]) // concurrency 2
@@ -104,7 +107,6 @@ async function run(mix: Mix, onProgress: (p: Progress) => void) {
   localStorage.setItem('ytm.supermix', JSON.stringify(mix))
   localStorage.setItem('ytm.offlineTracks', JSON.stringify(mix.tracks))
   localStorage.setItem(KEY, JSON.stringify({ at: mix.at, ids: ok } satisfies OfflineState))
-  for (const n of await caches.keys()) if (n.startsWith(PREFIX) && n !== name) await caches.delete(n)
   for (const [id, u] of urls) if (!ok.includes(id)) { URL.revokeObjectURL(u); urls.delete(id) }
 }
 
@@ -112,8 +114,6 @@ export async function clearOffline() {
   if (supported()) for (const n of await caches.keys()) if (n.startsWith(PREFIX)) await caches.delete(n)
   for (const u of urls.values()) URL.revokeObjectURL(u)
   urls.clear()
-  localStorage.removeItem(KEY)
-  localStorage.removeItem('ytm.offlineTracks')
 }
 
 async function cacheCovers(id: string) {
@@ -127,4 +127,50 @@ async function cacheCovers(id: string) {
   }
   const keys = await cache.keys()
   for (const key of keys.slice(0, Math.max(0, keys.length - 200))) await cache.delete(key)
+}
+
+
+/** Copy only completed local files, one at a time, while the player has spare capacity. */
+let copying = false
+export async function mirrorLibrary(tracks: { id: string; status: string; bytes: number }[], plan: Track[], idle: () => boolean) {
+  if (copying || resetBusy() || !supported() || localStorage.getItem('ytm.mirrorPaused') === '1') return
+  copying = true
+  try {
+    await navigator.storage?.persist?.().catch(() => false)
+    const cache = await caches.open('mix-library')
+    for (const track of plan) {
+      if (!idle() || resetBusy()) break
+      const entry = tracks.find(t => t.id === track.ytId && t.status === 'done')
+      if (!entry || isOffline(track.ytId)) continue
+      const space = await storageInfo()
+      if (space.quota && space.quota - space.used < entry.bytes + MIN_FREE) break
+      const response = await fetch('/api/audio?id=' + track.ytId, { headers: { Range: 'bytes=0-', 'X-Stormusic-Purpose': 'download' }, signal: AbortSignal.timeout(30000) })
+      if (!response.ok || response.headers.get('x-stormusic-source') !== 'disk') { await response.body?.cancel(); continue }
+      const blob = await response.blob()
+      if (blob.size !== entry.bytes || !blob.size) continue
+      await cache.put(path(track.ytId), new Response(blob, { headers: { 'Content-Type': 'audio/mp4', 'Content-Length': String(blob.size) } }))
+      const metadata = offlineTracks().filter(t => t.ytId !== track.ytId)
+      metadata.push(track)
+      localStorage.setItem('ytm.offlineTracks', JSON.stringify(metadata))
+      localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), ids: [...new Set([...(offlineState()?.ids || []), track.ytId])] }))
+      window.dispatchEvent(new Event('stormusic-offline'))
+      void cacheCovers(track.ytId).catch(() => {})
+    }
+  } finally { copying = false }
+}
+
+export async function removeCachedTrack(id: string) {
+  if (copying || running || resetBusy()) throw new Error('Aguarde a cópia offline terminar.')
+  const originals: { cache: Cache; response: Response }[] = []
+  for (const name of await caches.keys()) if (name.startsWith(PREFIX)) {
+    const cache = await caches.open(name), response = await cache.match(path(id))
+    if (response) originals.push({ cache, response })
+  }
+  const backup = await caches.open('stormusic-backup-track-' + id)
+  for (const item of originals) await backup.put(path(id), item.response.clone())
+  for (const item of originals) await item.cache.delete(path(id))
+  localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), ids: (offlineState()?.ids || []).filter(x => x !== id) }))
+  localStorage.setItem('ytm.offlineTracks', JSON.stringify(offlineTracks().filter(t => t.ytId !== id)))
+  const url = urls.get(id); if (url) URL.revokeObjectURL(url); urls.delete(id)
+  window.dispatchEvent(new Event('stormusic-offline'))
 }

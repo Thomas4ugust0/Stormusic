@@ -10,7 +10,8 @@
     "format": "oxfmt",
     "relay": "node server/standalone.ts",
     "build:phone": "vite build --mode phone",
-    "test:relay": "node --test server/*.test.ts"
+    "test:relay": "node --test server/*.test.ts",
+    "test:unit": "node --test src/lib/*.test.ts"
   },
   "dependencies": {
     "lucide-react": "^1.55.0",

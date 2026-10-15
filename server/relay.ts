@@ -1,3 +1,6 @@
+import { resolveTrack, invalidateResolved } from './resolver.ts'
+import { serveDisk, library } from './library.ts'
+import { libraryApi } from './libraryApi.ts'
 // Same-origin yt-dlp API for the phone PWA, also mounted in Vite for development.
 // Public instances are strictly opt-in via RELAY_PUBLIC_FALLBACK=1.
 import type { Plugin, Connect } from 'vite'
@@ -6,6 +9,7 @@ import { Readable } from 'node:stream'
 import { ApiError, extract, Lru, mapError, videoId } from './runtime.ts'
 import { music } from './music.ts'
 import { healthStatus, startUpdate } from './admin.ts'
+import { noteCache, requestMetric } from './metrics.ts'
 
 type Resolved = { headers?: Record<string, string>; url: string; duration: number; source: string; mime: string; bitrate: number; expires: number }
 
@@ -84,9 +88,11 @@ async function viaYtDlp(id: string): Promise<Resolved> {
 
 const firstOk = <T,>(ps: Promise<T>[]) => new Promise<T>((ok, ko) => { let n = ps.length; if (!n) ko(new Error('none')); ps.forEach((p) => p.then(ok, () => --n || ko(new Error('all failed')))) })
 
-async function resolve(id: string): Promise<Resolved> {
-  const hit = cache.get(id); if (hit) return hit
-  if (pending.has(id)) return pending.get(id)!
+async function resolve(id: string, purpose: 'play' | 'prefetch' | 'download' = 'play'): Promise<Resolved> {
+  if (process.env.RELAY_PUBLIC_FALLBACK !== '1') return resolveTrack(id, purpose)
+  const hit = cache.get(id); if (hit) { noteCache('hit'); return hit }
+  if (pending.has(id)) { noteCache('shared'); return pending.get(id)! }
+  noteCache('miss')
   const work = (async () => {
     let r: Resolved
     try { r = await viaYtDlp(id) }
@@ -106,6 +112,7 @@ const send = (res: Parameters<Connect.NextHandleFunction>[1], code: number, body
 export const handler: Connect.NextHandleFunction = async (req, res, next) => {
   const u = new URL(req.url ?? '/', 'http://localhost')
   if (u.pathname !== '/health' && !u.pathname.startsWith('/api/')) return next()
+  let metric: ReturnType<typeof requestMetric> | undefined
   const origin = process.env.RELAY_CORS_ORIGIN
   if (origin && origin !== '*' && req.headers.origin === origin && !u.pathname.startsWith('/api/admin/')) {
     res.setHeader('access-control-allow-origin', origin)
@@ -123,8 +130,9 @@ export const handler: Connect.NextHandleFunction = async (req, res, next) => {
       if (!['/api/admin/update-ytdlp', '/api/admin/update-app'].includes(u.pathname)) throw new ApiError('not_found', 'Endpoint não encontrado.', 404)
       return send(res, 202, await startUpdate(u.pathname.endsWith('update-app') ? 'app' : 'ytdlp'))
     }
+    if (/^\/api\/v1\/(plan|prefetch|library)(\/|$)/.test(u.pathname)) return await libraryApi(req, res, u.pathname)
     if (req.method !== 'GET' && req.method !== 'HEAD') throw new ApiError('method_not_allowed', 'Método não permitido.', 405)
-    if (u.pathname === '/health') return send(res, 200, await healthStatus())
+    if (u.pathname === '/health') return send(res, 200, { ...await healthStatus(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, localTime: new Date().toString() })
     if (['/api/v1/audio/search', '/api/v1/audio/related'].includes(u.pathname)) {
       const kind = u.pathname.endsWith('search') ? 'search' : 'related'
       const value = (u.searchParams.get(kind === 'search' ? 'q' : 'id') ?? '').trim()
@@ -135,34 +143,42 @@ export const handler: Connect.NextHandleFunction = async (req, res, next) => {
     if (u.pathname.startsWith('/api/resolve/')) {
       const id = u.pathname.slice('/api/resolve/'.length)
       if (!videoId.test(id)) throw new ApiError('invalid_input', 'ID de vídeo inválido.', 400)
-      const r = await resolve(id)
+      const local = (await library()).tracks.find(t => t.id === id && t.status === 'done' && !t.removed)
+      if (local) return send(res, 200, { url: '/api/audio?id=' + id, duration: local.duration, source: 'Disco do celular', mime: 'audio/mp4', bitrate: 0 })
+      metric = requestMetric(req, res, id, 'resolve')
+      const r = await metric.resolve(() => resolve(id, req.headers['x-stormusic-purpose'] === 'download' ? 'download' : req.headers['x-stormusic-purpose'] === 'prefetch' ? 'prefetch' : 'play'))
       return send(res, 200, { url: '/api/audio?id=' + id, duration: r.duration, source: r.source, mime: r.mime, bitrate: r.bitrate })
     }
     if (u.pathname === '/api/audio') {
       const id = u.searchParams.get('id') ?? ''
       if (!videoId.test(id)) throw new ApiError('invalid_input', 'ID de vídeo inválido.', 400)
+      if (await serveDisk(id, req, res)) return
+      res.setHeader('x-stormusic-source', 'live')
+      metric = requestMetric(req, res, id, 'audio')
       if (req.headers.range && !/^bytes=([0-9]+-[0-9]*|-[0-9]+)$/.test(req.headers.range)) throw new ApiError('invalid_range', 'Intervalo inválido.', 416)
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 180000)
+      const timer = setTimeout(() => { metric?.error('audio_timeout'); controller.abort() }, 180000)
       const stop = () => { clearTimeout(timer); controller.abort() }
       res.once('close', stop)
       try {
-        let r = await resolve(id)
+        let r = await metric.resolve(() => resolve(id, req.headers['x-stormusic-purpose'] === 'download' ? 'download' : req.headers['x-stormusic-purpose'] === 'prefetch' ? 'prefetch' : 'play'))
         let up: Response | undefined
         for (let attempt = 0; attempt < 2; attempt++) {
           up = await fetch(r.url, { signal: controller.signal, headers: { 'user-agent': UA, ...r.headers, ...(req.headers.range ? { range: req.headers.range } : {}) } })
           if (![403, 410].includes(up.status) || attempt === 1) break
-          await up.body?.cancel(); cache.delete(id); r = await resolve(id)
+          await up.body?.cancel(); cache.delete(id); invalidateResolved(id); metric.renewed(); r = await metric.resolve(() => resolve(id, req.headers['x-stormusic-purpose'] === 'download' ? 'download' : req.headers['x-stormusic-purpose'] === 'prefetch' ? 'prefetch' : 'play'))
         }
         if (!up) throw new Error('upstream')
         if (!up.ok && up.status !== 416) { await up.body?.cancel(); throw new ApiError('source_blocked', 'O YouTube recusou este IP; tente em outra rede', 502, true) }
         res.statusCode = up.status
+        if (up.status === 416) metric.error('invalid_range')
         res.setHeader('cache-control', 'no-store')
         for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) { const v = up.headers.get(h); if (v) res.setHeader(h, v) }
         if (!up.headers.get('content-type')) res.setHeader('content-type', r.mime)
         if (req.method === 'HEAD' || !up.body) { await up.body?.cancel(); stop(); return res.end() }
         const stream = Readable.fromWeb(up.body as never)
-        stream.once('error', () => res.destroy())
+        stream.on('data', (chunk: Buffer) => metric?.chunk(chunk.length))
+        stream.once('error', () => { metric?.error('upstream_stream_failed'); res.destroy() })
         res.once('close', () => stream.destroy())
         stream.pipe(res)
         return
@@ -171,6 +187,7 @@ export const handler: Connect.NextHandleFunction = async (req, res, next) => {
     throw new ApiError('not_found', 'Endpoint não encontrado.', 404)
   } catch (error) {
     const e = mapError(error)
+    metric?.error(e.code)
     if (res.headersSent) return res.destroy()
     return send(res, e.status, { error: { code: e.code, message: e.message, retryable: e.retryable } })
   }

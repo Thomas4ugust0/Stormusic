@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stormusic — backup do perfil</title>
+<style>body{background:#030303;color:white;font:16px system-ui;max-width:560px;margin:32px auto;padding:20px}button,input{font:inherit}button{padding:12px;margin:12px 0;border-radius:12px;cursor:pointer}button:disabled{opacity:.4}#restore{background:#ff0033;color:white}p{line-height:1.5}label{display:block;margin:20px 0}a{color:#ff4e6b}</style>
+<h1>Backup do perfil Stormusic</h1>
+<p>Abra esta página no mesmo Chrome usado pelo app, em <strong>http://localhost:8787</strong>. Feche as outras páginas do Stormusic antes de restaurar.</p>
+<p>O arquivo salva perfil, curtidas, gosto, mix e plano. Áudios do navegador não estão incluídos; os arquivos do Termux são protegidos separadamente.</p>
+<button id="export">Salvar backup no celular</button>
+<p id="summary"></p>
+<h2>Restaurar após reinstalar</h2>
+<input id="file" type="file" accept="application/json,.json" aria-label="Arquivo de backup Stormusic">
+<label><input id="understood" type="checkbox"> Entendi que os dados presentes no arquivo substituirão os correspondentes deste navegador.</label>
+<button id="restore" disabled>Confirmar restauração</button>
+<p id="status" role="status"></p>
+<p><a href="/">Abrir Stormusic</a></p>
+<script>
+const keys = ['ytm.profile', 'ytm.fb', 'ytm.taste', 'ytm.supermix', 'ytm.dailyPlan', 'ytm.backup'];
+const status = document.querySelector('#status'), file = document.querySelector('#file'), understood = document.querySelector('#understood'), restore = document.querySelector('#restore');
+const snapshot = () => Object.fromEntries(keys.map(key => [key, localStorage.getItem(key)]));
+function download(values, prefix) {
+  const blob = new Blob([JSON.stringify({version:1, kind:'stormusic-browser', at:Date.now(), values})], {type:'application/json'});
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = prefix + '-' + new Date().toISOString().replace(/[:.]/g,'-') + '.json'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+const array = value => Array.isArray(value) && value.length <= 50000;
+function validate(key, value) {
+  if (typeof value !== 'string' || value.length > 8 * 1024 * 1024) throw Error('Valor inválido no backup.');
+  const data = JSON.parse(value);
+  if (!data || typeof data !== 'object') throw Error('Dados incompletos no backup.');
+  if (key === 'ytm.profile' && !['genres','subs','artists'].every(k => array(data[k]) && data[k].length <= 500 && data[k].every(v => typeof v === 'string' && v.length <= 500))) throw Error('Perfil inválido.');
+  if (key === 'ytm.fb' && !['liked','disliked','played'].every(k => array(data[k]) && data[k].every(v => typeof v === 'string' && v.length <= 500))) throw Error('Curtidas inválidas.');
+  if (key === 'ytm.taste' && (!array(data.ev) || !data.meta || typeof data.meta !== 'object')) throw Error('Gosto inválido.');
+  if ((key === 'ytm.supermix' || key === 'ytm.dailyPlan') && (!array(data.tracks) || data.tracks.length > 500 || !Number.isFinite(data.at))) throw Error('Plano ou mix inválido.');
+  if (key === 'ytm.backup' && (data.version !== 1 || !Number.isFinite(data.at) || !data.values || Object.keys(data.values).some(k => !['ytm.profile','ytm.fb','ytm.taste'].includes(k)))) throw Error('Backup interno inválido.');
+}
+try {
+  const values = snapshot();
+  document.querySelector('#summary').textContent = values['ytm.profile'] ? 'Perfil encontrado neste navegador.' : 'Perfil ausente neste navegador. O arquivo ainda preservará os outros dados disponíveis; confira o Chrome usado pelo app.';
+} catch { status.textContent = 'Armazenamento indisponível. Abra esta página no Chrome do app.'; }
+document.querySelector('#export').onclick = () => { try { download(snapshot(), 'Stormusic-perfil'); status.textContent = 'Salve o arquivo JSON e confira se apareceu em Downloads antes de desinstalar.'; } catch { status.textContent = 'Não foi possível exportar o perfil.'; } };
+const update = () => { restore.disabled = !understood.checked || !file.files.length; };
+file.onchange = () => { understood.checked = false; update(); }; understood.onchange = update;
+restore.onclick = async () => {
+  if (!understood.checked || !file.files.length) return;
+  restore.disabled = true;
+  try {
+    if (file.files[0].size > 16 * 1024 * 1024) throw Error('Arquivo maior que 16 MB.');
+    const backup = JSON.parse(await file.files[0].text());
+    if (backup.version !== 1 || backup.kind !== 'stormusic-browser' || !backup.values || typeof backup.values !== 'object' || Array.isArray(backup.values) || Object.keys(backup.values).some(k => !keys.includes(k))) throw Error('Formato de backup incompatível.');
+    const entries = Object.entries(backup.values).filter(([,value]) => value !== null && value !== 'null');
+    if (!entries.length) throw Error('O arquivo não contém dados para restaurar.');
+    for (const [key,value] of entries) validate(key,value);
+    const current = snapshot();
+    // Write the recovery copy before replacing any existing value. Quota failure cancels restoration.
+    localStorage.setItem('ytm.reinstallBackup', JSON.stringify({version:1, kind:'stormusic-browser', at:Date.now(), values:current}));
+    download(current, 'Stormusic-antes-restauracao');
+    try { for (const [key,value] of entries) localStorage.setItem(key,value); }
+    catch (error) { for (const [key] of entries) { if (current[key] === null) localStorage.removeItem(key); else localStorage.setItem(key,current[key]); } throw error; }
+    status.textContent = 'Restauração concluída. Abra Stormusic pelo link abaixo. Os dados já existentes e ausentes do arquivo foram mantidos.';
+  } catch (error) { status.textContent = 'Restauração cancelada: ' + error.message; }
+  finally { understood.checked = false; update(); }
+};
+</script></html>

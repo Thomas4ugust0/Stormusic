@@ -18,8 +18,9 @@ export async function localRequest(path: string, init: RequestInit = {}, timeout
   if (!response.ok) { const body = await response.json().catch(() => null); throw new Error(body?.error?.message || `Falha no motor local (HTTP ${response.status})`) }
   return response
 }
-async function localAudio(id: string): Promise<Resolved> {
-  const r = await (await localRequest(`/api/resolve/${id}`)).json()
+type RequestPurpose = 'play' | 'prefetch' | 'download'
+async function localAudio(id: string, purpose: RequestPurpose = 'play'): Promise<Resolved> {
+  const r = await (await localRequest(`/api/resolve/${id}`, { headers: { 'X-Stormusic-Purpose': purpose } })).json()
   if (r.duration) rememberDuration(id, r.duration)
   return { ...r, real: true }
 }
@@ -66,7 +67,7 @@ export const getRelay = () => localStorage.getItem('ytm.relay') || ''
 export const setRelay = (u: string) => {
   const norm = u ? normalizeUrl(u, 8787) : ''
   if (norm) localStorage.setItem('ytm.relay', norm)
-  else localStorage.removeItem('ytm.relay')
+  else localStorage.setItem('ytm.relay', '')
   cache.clear()
 }
 const PIPED = ['https://pipedapi.kavin.rocks', 'https://pipedapi.adminforge.de']
@@ -203,10 +204,29 @@ async function json(url: string, ms: number) {
 /** Full audio file through AudioFlow, used by the offline downloader (no Range, whole file). */
 export async function fetchAudioBlob(ytId: string): Promise<Blob> {
   if (getMode() === 'local') {
-    const r = await localAudio(ytId)
-    const response = await localRequest(r.url, {}, 180000)
+    const r = await localAudio(ytId, 'download')
+    // Use the same range transport as the audio element, but require the whole file.
+    const response = await localRequest(r.url, { headers: { 'X-Stormusic-Purpose': 'download', Range: 'bytes=0-' } }, 180000)
+    let expected: number | null = null
+    const length = response.headers.get('content-length')
+    if (response.status === 206) {
+      const range = /^bytes 0-([0-9]+)\/([0-9]+)$/.exec(response.headers.get('content-range') || '')
+      if (!range || !Number.isSafeInteger(Number(range[2])) || Number(range[2]) <= 0 || Number(range[1]) + 1 !== Number(range[2])) {
+        await response.body?.cancel()
+        throw new Error('O servidor retornou apenas parte do áudio. Tente baixar novamente.')
+      }
+      expected = Number(range[2])
+    }
+    if (length !== null) {
+      if (!/^[0-9]+$/.test(length) || !Number.isSafeInteger(Number(length)) || Number(length) <= 0 || (expected !== null && expected !== Number(length))) {
+        await response.body?.cancel()
+        throw new Error('O tamanho informado do áudio é inválido. Tente baixar novamente.')
+      }
+      expected = Number(length)
+    }
     const blob = await response.blob()
     if (!blob.size || !/audio|video|octet-stream/.test(blob.type)) throw new Error('O servidor não retornou um arquivo de áudio válido.')
+    if (expected !== null && blob.size !== expected) throw new Error('Download incompleto. Tente baixar novamente.')
     return blob
   }
   const c = getAudioFlow()
@@ -214,10 +234,10 @@ export async function fetchAudioBlob(ytId: string): Promise<Blob> {
   return (await viaAudioFlow(c, ytId)).blob!
 }
 
-async function run(ytId: string, idx: number, live: boolean, onStatus?: (s: string) => void): Promise<Resolved> {
+async function run(ytId: string, idx: number, live: boolean, onStatus?: (s: string) => void, purpose: RequestPurpose = 'play'): Promise<Resolved> {
   const off = await offlineUrl(ytId).catch(() => null)
   if (off) return { url: off, source: 'Offline', real: true }
-  if (getMode() === 'local') { onStatus?.('Resolvendo no celular…'); return localAudio(ytId) }
+  if (getMode() === 'local') { onStatus?.('Resolvendo no celular…'); return localAudio(ytId, purpose) }
   if (live && !navigator.onLine) throw new AudioFlowError('offline', 'Sem conexão e faixa não baixada')
   if (live) {
     const c = getAudioFlow()
@@ -247,15 +267,19 @@ async function run(ytId: string, idx: number, live: boolean, onStatus?: (s: stri
 
 export let lastAudioFlowError = ''
 
-export function resolveAudio(ytId: string, idx: number, live: boolean, onStatus?: (s: string) => void): Promise<Resolved> {
+export function resolveAudio(ytId: string, idx: number, live: boolean, onStatus?: (s: string) => void, purpose: RequestPurpose = 'play'): Promise<Resolved> {
   const key = ytId + live
   const hit = cache.get(key); if (hit && getMode() !== 'local') return Promise.resolve(hit)
-  if (!inflight.has(key)) inflight.set(key, run(ytId, idx, live, onStatus).then((r) => { if (r.real || !live) cache.set(key, r); return r }).finally(() => { inflight.delete(key) }))
+  if (!inflight.has(key)) inflight.set(key, run(ytId, idx, live, onStatus, purpose).then((r) => { if (r.real || !live) cache.set(key, r); return r }).finally(() => { inflight.delete(key) }))
   return inflight.get(key)!
 }
 
 // Warm the next tracks so skips are instant.
-export const prefetch = (ids: { ytId: string; idx: number }[], live: boolean) => ids.forEach((t) => void resolveAudio(t.ytId, t.idx, live).catch(() => {}))
+export const prefetch = (ids: { ytId: string; idx: number }[], live: boolean) => {
+  if (!ids.length) return
+  if (getMode() === 'local') { void localRequest('/api/v1/prefetch', { method: 'POST', headers: { 'X-Stormusic': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: ids.slice(0, 5).map(t => t.ytId) }) }, 10000).catch(() => {}); return }
+  ids.forEach(t => void resolveAudio(t.ytId, t.idx, live, undefined, 'prefetch').catch(() => {}))
+}
 export const invalidate = (ytId: string) => {
   const r = cache.get(ytId + true)
   if (r?.url.startsWith('blob:')) URL.revokeObjectURL(r.url)

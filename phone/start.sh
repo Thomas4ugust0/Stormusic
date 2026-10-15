@@ -1,4 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/bash
+export TZ="$(getprop persist.sys.timezone 2>/dev/null || true)"
+export TZ="${TZ:-America/Sao_Paulo}"
 set -euo pipefail
 STATE_DIR="${RELAY_STATE_DIR:-$HOME/.stormusic}"
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"

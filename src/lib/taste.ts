@@ -25,6 +25,7 @@ const MIX_KEY = 'ytm.supermix'
 
 const load = (): Store => { try { const s = JSON.parse(localStorage.getItem(KEY) || ''); return { ev: s.ev ?? [], meta: s.meta ?? {} } } catch { return { ev: [], meta: {} } } }
 let store = load()
+export const reloadTaste = () => { store = load() }
 const save = () => localStorage.setItem(KEY, JSON.stringify(store))
 
 /** Preserve resolved metadata without adding a taste signal. */
@@ -57,28 +58,36 @@ export const artistKey = (a: string) => a.toLowerCase().normalize('NFD').replace
 const sameSong = (a: string, b: string) => !!a && !!b && (a === b || (Math.min(a.length, b.length) >= 5 && (a.includes(b) || b.includes(a))))
 
 // --- signals --------------------------------------------------------------------------------
-export function record(t: Track, k: Signal) {
+export function record(t: Track, k: Signal, now = Date.now()) {
   store.meta[t.ytId] = { title: t.title, artist: t.artist, dur: knownDuration(t.ytId, t.dur), sub: t.sub }
-  store.ev.push({ y: t.ytId, k, at: Date.now() })
+  const event: Ev = { y: t.ytId, k, at: now }
+  store.ev.push(event)
+  const dropped = store.ev.slice(0, Math.max(0, store.ev.length - 3000))
   if (store.ev.length > 3000) store.ev = store.ev.slice(-3000)
   save()
+  return () => {
+    if (!store.ev.includes(event)) return
+    store.ev = [...dropped, ...store.ev.filter(e => e !== event)].slice(-3000)
+    save()
+  }
 }
 /** Called when playback leaves a track. */
-export function recordPlayback(t: Track, listenedSec: number, finished: boolean) {
-  if (finished || listenedSec >= 30) record(t, 'listen')
-  else if (listenedSec >= 1) record(t, 'skip')
+export const SKIP_MIN_SEC = 1
+export const tasteEvents = () => store.ev.map(e => ({ ...e }))
+export function recordPlayback(t: Track, listenedSec: number, finished: boolean, now = Date.now()) {
+  if (finished || listenedSec >= 30) record(t, 'listen', now)
+  else if (listenedSec >= SKIP_MIN_SEC) record(t, 'skip', now)
 }
 
 const decay = (at: number, now: number) => Math.pow(0.5, (now - at) / HALF_LIFE_MS)
 
-function model(profile: Profile | null) {
-  const now = Date.now()
+export function scoreTaste(profile: Profile | null, events: Ev[], metadata: Record<string, Meta>, now: number) {
   const track = new Map<string, number>()
   const artist = new Map<string, number>()
   const recent = new Set<string>()
   const recentKeys: string[] = []
-  for (const e of store.ev) {
-    const m = store.meta[e.y]; if (!m) continue
+  for (const e of events) {
+    const m = metadata[e.y]; if (!m) continue
     const w = W[e.k] * decay(e.at, now)
     track.set(e.y, (track.get(e.y) ?? 0) + w)
     const ak = artistKey(m.artist)
@@ -87,10 +96,12 @@ function model(profile: Profile | null) {
   }
   // explicit like/dislike state = last explicit vote
   const vote = new Map<string, Signal>()
-  for (const e of store.ev) if (e.k === 'like' || e.k === 'dislike') vote.set(e.y, e.k); else if (e.k === 'unlike') vote.delete(e.y)
+  for (const e of events) if (e.k === 'like' || e.k === 'dislike') vote.set(e.y, e.k); else if (e.k === 'unlike') vote.delete(e.y)
   for (const a of profile?.artists ?? []) artist.set(artistKey(a), (artist.get(artistKey(a)) ?? 0) + 2)
   return { track, artist, recent, recentKeys, vote }
 }
+export const model = (profile: Profile | null, now = Date.now()) => scoreTaste(profile, store.ev, store.meta, now)
+
 
 export const isLiked = (ytId: string) => { let v: Signal | undefined; for (const e of store.ev) if (e.y === ytId && (e.k === 'like' || e.k === 'dislike' || e.k === 'unlike')) v = e.k; return v === 'like' }
 export function likedTracks(): Track[] {

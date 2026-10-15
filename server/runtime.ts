@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { noteExtraction } from './metrics.ts'
 
 export const videoId = /^[A-Za-z0-9_-]{11}$/
 export class ApiError extends Error {
@@ -30,16 +31,25 @@ let active = 0
 const waiting: (() => void)[] = []
 const attempts: number[] = []
 export async function extract(args: string[]) {
+  const queuedAt = performance.now()
   const now = Date.now()
   while (attempts.length && attempts[0] < now - 3600000) attempts.shift()
   if (attempts.length >= (Number(process.env.RELAY_MAX_RESOLVES_PER_HOUR) || 120)) throw new ApiError('rate_limited', 'Limite de extrações atingido. Tente mais tarde.', 429, true)
   attempts.push(now)
   if (active >= concurrency) await new Promise<void>((done) => waiting.push(done))
   else active++
+  const startedAt = performance.now()
+  let measuredError: string | null = null
   try {
     return JSON.parse(await command(ytdlpPath(), ['--ignore-config', '--no-warnings', '--js-runtimes', 'node', ...args]))
-  } catch (error) { throw mapError(error) }
-  finally { const next = waiting.shift(); if (next) next(); else active-- }
+  } catch (error) {
+    const mapped = mapError(error)
+    measuredError = (error as { killed?: boolean })?.killed ? 'extract_timeout' : mapped.code
+    throw mapped
+  } finally {
+    noteExtraction(startedAt - queuedAt, performance.now() - startedAt, measuredError)
+    const next = waiting.shift(); if (next) next(); else active--
+  }
 }
 export class Lru<T> {
   entries = new Map<string, { value: T; expires: number }>()

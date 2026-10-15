@@ -25,11 +25,11 @@ react(),
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
+        includeAssets: ['favicon.svg', 'stormusic-apple-touch-icon.png'],
         manifest: {
           name: 'Stormusic',
           short_name: 'Stormusic',
-          description: 'Supermix pessoal sem anúncios',
+          description: 'Stormusic: sua música, sem espera.',
           lang: 'pt-BR',
           display: 'standalone',
           orientation: 'portrait',
@@ -38,9 +38,9 @@ react(),
           theme_color: '#030303',
           background_color: '#030303',
           icons: [
-            { src: 'pwa-192.png', sizes: '192x192', type: 'image/png' },
-            { src: 'pwa-512.png', sizes: '512x512', type: 'image/png' },
-            { src: 'pwa-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+            { src: 'stormusic-icon-192.png', sizes: '192x192', type: 'image/png' },
+            { src: 'stormusic-icon-512.png', sizes: '512x512', type: 'image/png' },
+            { src: 'stormusic-icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
           ],
         },
         workbox: {
@@ -127,7 +127,7 @@ function figmaSiteConfiguration(config: FigmaSiteConfiguration): Plugin {
     return html.replace(`<!-- ${slotName} -->`, content)
   }
 
-  const title = config.title ?? "Figma Make App"
+  const title = config.title ?? 'Stormusic'
   const description = config.description ?? ''
   // Imported HTML keeps its own favicon; new Makes default to the Make product icon.
   const favicon = config.icons?.icon ?? '/favicon.svg'
