@@ -1,0 +1,12 @@
+@import 'tailwindcss';
+
+html, body, #root { height: 100%; background: #030303; color: #fff; }
+body { font-family: Roboto, system-ui, -apple-system, sans-serif; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }
+.pt-safe { padding-top: env(safe-area-inset-top); }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+input[type=range].yt { -webkit-appearance: none; appearance: none; height: 3px; border-radius: 2px; background: linear-gradient(to right, #fff var(--p), rgba(255,255,255,.25) var(--p)); }
+input[type=range].yt::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #fff; }
+@keyframes up { from { transform: translateY(100%); } to { transform: none; } }
+.slide-up { animation: up .28s cubic-bezier(.2,.8,.2,1); }

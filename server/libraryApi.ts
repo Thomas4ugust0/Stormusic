@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ApiError, videoId } from './runtime.ts'
-import { library, snapshot, removeTrack, saveLibrary } from './library.ts'
+import { library, snapshot, removeTrack } from './library.ts'
 import { savePlan } from './planner.ts'
-import { runDownloads, isRunning } from './downloads.ts'
+import { runDownloads } from './downloads.ts'
 import { resolveTrack } from './resolver.ts'
 
 async function body(req: IncomingMessage): Promise<any> {
@@ -17,7 +17,7 @@ export async function libraryApi(req: IncomingMessage, res: ServerResponse, path
   const value = await body(req)
   if (path === '/api/v1/plan' && req.method === 'PUT') {
     const result = await savePlan(value); send(200, result)
-    if (value.immediate) void runDownloads().catch(() => {})
+    if (value.immediate && result.missing > 0 && !(await library()).lastRunAt) void runDownloads().catch(() => {})
     return
   }
   if (path === '/api/v1/prefetch' && req.method === 'POST') {
@@ -25,18 +25,14 @@ export async function libraryApi(req: IncomingMessage, res: ServerResponse, path
     for (const id of new Set<string>(value.ids)) void resolveTrack(id, 'prefetch').catch(() => {})
     send(202); return
   }
-  if (path === '/api/v1/library/run' && req.method === 'POST') { void runDownloads().catch(() => {}); send(202); return }
-  if (path === '/api/v1/library/retry' && req.method === 'POST') {
-    if (typeof value.id !== 'string' || !videoId.test(value.id)) throw new ApiError('invalid_input', 'ID inválido.', 400)
-    const state = await library(), track = state.tracks.find(t => t.id === value.id && !t.removed)
-    if (!track) throw new ApiError('not_found', 'Faixa não encontrada.', 404)
-    if (track.status === 'failed') { track.status = 'queued'; track.attempts = 0; track.error = null; await saveLibrary() }
-    void runDownloads(0, false).catch(() => {}); send(202); return
+  if (path === '/api/v1/library/run' && req.method === 'POST') {
+    void runDownloads(0, true, {}, true).catch(() => {})
+    send(202); return
   }
+  if (['/api/v1/library/retry'].includes(path) && req.method === 'POST') throw new ApiError('automatic_downloads', 'Os downloads são renovados automaticamente no próximo agendamento.', 410)
   if (path.startsWith('/api/v1/library/') && req.method === 'DELETE') {
     const id = path.slice('/api/v1/library/'.length)
     if (!videoId.test(id)) throw new ApiError('invalid_input', 'ID inválido.', 400)
-    if (isRunning()) throw new ApiError('busy', 'Aguarde o lote terminar antes de remover.', 409)
     await removeTrack(id); send(204); return
   }
   throw new ApiError('not_found', 'Endpoint não encontrado.', 404)

@@ -1,14 +1,16 @@
-import { mkdir, readFile, rename, open, stat, statfs } from 'node:fs/promises'
+import { mkdir, readFile, rename, open, stat, statfs, unlink, readdir } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { cancelDownloadJob } from './downloadJobs.ts'
 import { ApiError, videoId } from './runtime.ts'
 
+export const MAX_DOWNLOADS = 40
 export type Track = { id: string; title: string; artist: string; album?: string; duration: number }
 export type Entry = Track & { status: 'queued' | 'resolving' | 'downloading' | 'done' | 'failed'; bytes: number; total: number; percent: number; attempts: number; error: string | null; updatedAt: number; addedAt: number; removed?: boolean; outsideSince?: number; cleanupEligible?: boolean; partialKey?: string; partialExpires?: number }
-export type State = { version: 1; tracks: Entry[]; nextRunAt: number; windowEndAt: number; lastRunAt: number; lastRunStatus: string; running: boolean; currentId: string | null; pauseUntil: number; pauses: number; blocked: number }
+export type State = { version: 1; tracks: Entry[]; nextRunAt: number; windowEndAt: number; lastRunAt: number; lastRunStatus: string; running: boolean; currentId: string | null; pauseUntil: number; pauses: number; blocked: number; storageVersion?: number }
 export const directory = () => process.env.RELAY_STATE_DIR || resolve(homedir(), '.stormusic')
 export const audioPath = (id: string, partial = false) => {
   if (!videoId.test(id)) throw new ApiError('invalid_input', 'ID inválido.', 400)
@@ -37,6 +39,19 @@ export function library(): Promise<State> {
       if (track.status === 'downloading' || track.status === 'resolving') { track.status = 'queued'; track.attempts = 0 }
       if (track.status === 'done' && !(await stat(audioPath(track.id)).catch(() => null))?.isFile()) { track.status = 'queued'; track.bytes = 0; track.percent = 0 }
     }
+    // Migrate the previous unbounded collection before admitting new downloads.
+    const plan = await readState<{ tracks: Track[] }>('plan.json', { tracks: [] })
+    const rank = new Map(plan.tracks.slice(0, MAX_DOWNLOADS).map((t, i) => [t.id, i]))
+    const active = state.tracks.filter(t => !t.removed).sort((a, b) => (rank.get(a.id) ?? MAX_DOWNLOADS) - (rank.get(b.id) ?? MAX_DOWNLOADS) || b.addedAt - a.addedAt)
+    const excess = active.slice(MAX_DOWNLOADS)
+    for (const track of [...excess, ...state.tracks.filter(t => t.removed)]) await deleteAudioFiles(track.id)
+    state.tracks = state.tracks.filter(t => !excess.includes(t))
+    for (const track of state.tracks) if (track.removed) Object.assign(track, { status: 'queued', bytes: 0, total: 0, percent: 0 })
+    if (state.storageVersion !== 2) {
+      await deleteLegacyAudioBackups()
+      state.storageVersion = 2
+    }
+    await atomic('library.json', state)
     return state
   })()
 }
@@ -67,26 +82,48 @@ export async function snapshot() {
   const averageSize = done.length ? done.reduce((n, t) => n + t.bytes, 0) / done.length : current?.total || 0
   const eta = state.running && transferSample.rate > 0 && averageSize > 0
     ? Math.ceil(remaining.reduce((n, t) => n + Math.max(0, (t.total || averageSize) - t.bytes), 0) / transferSample.rate + Math.max(0, remaining.length - 1) * 30 + Math.max(0, state.pauseUntil - now) / 1000) : null
-  return { tracks, summary: { done: done.length, total: tracks.length, failed: tracks.filter(t => t.status === 'failed').length,
+  return { tracks, removedIds: state.tracks.filter(t => t.removed).map(t => t.id), summary: { done: done.length, total: tracks.length, failed: tracks.filter(t => t.status === 'failed').length,
     bytes: done.reduce((n, t) => n + t.bytes, 0), minutes: done.reduce((n, t) => n + t.duration, 0) / 60,
-    etaSec: eta, running: state.running, currentId: state.currentId, nextRunAt: state.nextRunAt, windowEndAt: state.windowEndAt,
+    limit: MAX_DOWNLOADS, etaSec: eta, running: state.running, currentId: state.currentId, nextRunAt: state.nextRunAt, windowEndAt: state.windowEndAt,
     lastRunAt: state.lastRunAt, lastRunStatus: state.lastRunStatus, pauseUntil: state.pauseUntil } }
 }
-export async function removeTrack(id: string) {
-  const state = await library(), track = state.tracks.find(t => t.id === id)
-  if (!track) throw new ApiError('not_found', 'Faixa não encontrada.', 404)
-  if (state.running) throw new ApiError('busy', 'Aguarde o lote terminar antes de remover.', 409)
-  // Move to a recoverable backup before changing the library. Never unlink user audio.
-  const backup = resolve(directory(), 'backups', Date.now() + '-' + randomUUID())
-  await mkdir(backup, { recursive: true })
-  const meta = await open(resolve(backup, 'track.json'), 'wx', 0o600)
-  try { await meta.writeFile(JSON.stringify(track)); await meta.sync() } finally { await meta.close() }
-  for (const part of [false, true]) {
-    try { await rename(audioPath(id, part), resolve(backup, id + '.m4a' + (part ? '.part' : ''))) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+let mutations = Promise.resolve()
+export function mutateLibrary<T>(work: () => Promise<T>): Promise<T> {
+  const next = mutations.catch(() => {}).then(work)
+  mutations = next.then(() => {}, () => {})
+  return next
+}
+async function unlinkIfPresent(path: string) {
+  try { await unlink(path) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+}
+export async function deleteAudioFiles(id: string) {
+  await unlinkIfPresent(audioPath(id)); await unlinkIfPresent(audioPath(id, true))
+}
+async function deleteLegacyAudioBackups(id?: string) {
+  const backups = resolve(directory(), 'backups')
+  for (const entry of await readdir(backups, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error })) {
+    if (!entry.isDirectory()) continue
+    const folder = resolve(backups, entry.name)
+    let track: Track
+    try { track = JSON.parse(await readFile(resolve(folder, 'track.json'), 'utf8')) } catch { continue }
+    if (!track || typeof track.id !== 'string' || !videoId.test(track.id) || (id && track.id !== id)) continue
+    // Keep only tiny metadata; old copies must not keep consuming audio storage.
+    await unlinkIfPresent(resolve(folder, track.id + '.m4a'))
+    await unlinkIfPresent(resolve(folder, track.id + '.m4a.part'))
   }
-  track.removed = true; track.status = 'queued'; track.bytes = 0; track.percent = 0
-  await saveLibrary()
+}
+export function removeTrack(id: string) {
+  return mutateLibrary(async () => {
+    const state = await library(), track = state.tracks.find(t => t.id === id)
+    if (!track) return // Idempotent: permits retry after a lost response or capacity eviction.
+    track.removed = true
+    await saveLibrary() // Durable exclusion precedes cancellation and deletion.
+    await cancelDownloadJob(id)
+    await deleteAudioFiles(id)
+    await deleteLegacyAudioBackups(id)
+    Object.assign(track, { status: 'queued', bytes: 0, total: 0, percent: 0, attempts: 0, error: null, partialKey: '', partialExpires: 0 })
+    await saveLibrary()
+  })
 }
 export async function serveDisk(id: string, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   const track = (await library()).tracks.find(t => t.id === id && t.status === 'done' && !t.removed)

@@ -14,7 +14,7 @@
 <p id="status" role="status"></p>
 <p><a href="/">Abrir Stormusic</a></p>
 <script>
-const keys = ['ytm.profile', 'ytm.fb', 'ytm.taste', 'ytm.supermix', 'ytm.dailyPlan', 'ytm.backup'];
+const keys = ['ytm.profile', 'ytm.fb', 'ytm.taste', 'ytm.supermix', 'ytm.dailyPlan', 'ytm.backup', 'ytm.repeatDays', 'ytm.removedDownloads'];
 const status = document.querySelector('#status'), file = document.querySelector('#file'), understood = document.querySelector('#understood'), restore = document.querySelector('#restore');
 const snapshot = () => Object.fromEntries(keys.map(key => [key, localStorage.getItem(key)]));
 function download(values, prefix) {
@@ -27,6 +27,8 @@ const array = value => Array.isArray(value) && value.length <= 50000;
 function validate(key, value) {
   if (typeof value !== 'string' || value.length > 8 * 1024 * 1024) throw Error('Valor inválido no backup.');
   const data = JSON.parse(value);
+  if (key === 'ytm.repeatDays') { if (!Number.isInteger(data) || data < 1 || data > 10) throw Error('Intervalo inválido.'); return; }
+  if (key === 'ytm.removedDownloads' && (!array(data) || data.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(id)))) throw Error('Remoções inválidas.');
   if (!data || typeof data !== 'object') throw Error('Dados incompletos no backup.');
   if (key === 'ytm.profile' && !['genres','subs','artists'].every(k => array(data[k]) && data[k].length <= 500 && data[k].every(v => typeof v === 'string' && v.length <= 500))) throw Error('Perfil inválido.');
   if (key === 'ytm.fb' && !['liked','disliked','played'].every(k => array(data[k]) && data[k].every(v => typeof v === 'string' && v.length <= 500))) throw Error('Curtidas inválidas.');
