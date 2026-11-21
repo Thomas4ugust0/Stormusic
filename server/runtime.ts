@@ -41,7 +41,8 @@ export async function extract(args: string[]) {
   const startedAt = performance.now()
   let measuredError: string | null = null
   try {
-    return JSON.parse(await command(ytdlpPath(), ['--ignore-config', '--no-warnings', '--js-runtimes', 'node', ...args]))
+    const node = process.env.STORMUSIC_NODE
+    return JSON.parse(await command(ytdlpPath(), ['--ignore-config', '--no-warnings', '--js-runtimes', node ? `node:${node}` : 'node', ...args]))
   } catch (error) {
     const mapped = mapError(error)
     measuredError = (error as { killed?: boolean })?.killed ? 'extract_timeout' : mapped.code

@@ -1,5 +1,5 @@
 import { startScheduler } from './scheduler.ts'
-import { createServer } from 'node:http'
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createReadStream } from 'node:fs'
 import { stat, realpath } from 'node:fs/promises'
 import { resolve, extname, sep } from 'node:path'
@@ -8,9 +8,13 @@ import { handler } from './relay.ts'
 import { autoUpdate } from './admin.ts'
 
 const types: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.jpg': 'image/jpeg' }
-export function createApp(webDir = process.env.WEB_DIR || fileURLToPath(new URL('../dist', import.meta.url))) {
+export function createApp(
+  webDir = process.env.WEB_DIR || fileURLToPath(new URL('../dist', import.meta.url)),
+  allowRequest?: (req: IncomingMessage, res: ServerResponse) => boolean,
+) {
   const root = resolve(webDir)
   return createServer((req, res) => {
+    if (allowRequest && !allowRequest(req, res)) { res.writeHead(403); res.end(); return }
     const raw = req.url?.split('?')[0] || '/'
     let pathname: string
     try { pathname = decodeURIComponent(raw) } catch { res.writeHead(400); res.end(); return }
