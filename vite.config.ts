@@ -1,20 +1,25 @@
 import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import streamRelay from './server/relay.ts'
 import { VitePWA } from 'vite-plugin-pwa'
 
-import siteConfiguration from './.figma/make/site.json' with { type: 'json' }
+const siteFile = new URL('./.figma/make/site.json', import.meta.url)
+const siteConfiguration: FigmaSiteConfiguration = existsSync(siteFile)
+  ? JSON.parse(readFileSync(siteFile, 'utf8'))
+  : { title: 'Stormusic', language: 'pt-BR', robots: { index: false } }
 
 
 // Vite config — https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   // .figma/make/deploy-preview passes `--mode development` for cached-preview builds.
   const emitSourcemaps = mode === 'development'
+  const desktop = mode === 'desktop'
 
   return {
-    base: mode !== 'phone' && process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : '/',
+    base: !['phone', 'desktop'].includes(mode) && process.env.FIGMA_PUBLIC_URL ? `${process.env.FIGMA_PUBLIC_URL}/` : '/',
     build: {
       sourcemap: emitSourcemaps ? 'inline' : false,
       minify: !emitSourcemaps,
@@ -23,7 +28,7 @@ export default defineConfig(({ mode }) => {
 react(),
       streamRelay(),
       tailwindcss(),
-      VitePWA({
+      !desktop && VitePWA({
         strategies: 'injectManifest',
         srcDir: 'src',
         filename: 'sw.ts',
@@ -49,10 +54,11 @@ react(),
         },
 
       }),
-      figmaSiteConfiguration(mode === 'phone' ? { ...siteConfiguration, title: 'Stormusic', language: 'pt-BR' } : siteConfiguration),
-      figmaErrorOverlayReplay(),
-      figmaReactRefreshBoundaryFallback(),
-      figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),
+      figmaSiteConfiguration(desktop ? { title: 'Stormusic', language: 'pt-BR', robots: { index: false } }
+        : mode === 'phone' ? { ...siteConfiguration, title: 'Stormusic', language: 'pt-BR' } : siteConfiguration),
+      !desktop && figmaErrorOverlayReplay(),
+      !desktop && figmaReactRefreshBoundaryFallback(),
+      !desktop && figmaMakeKitPlugin({ storiesGlob: '/src/**/*.stories.{ts,tsx,js,jsx}' }),
     ],
     resolve: {
       alias: {

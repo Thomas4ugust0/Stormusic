@@ -1,4 +1,5 @@
 import { flushDownloadDeletes } from './lib/downloadActions'
+import DesktopPlayer, { DesktopUpdates } from './components/DesktopPlayer'
 import { getRepeatDays, setRepeatDays, rememberRemovedDownloads, isDownloadRemoved } from './lib/listeningPolicy'
 import { eligibleTracks, markPlayed, reloadTaste } from './lib/taste'
 import Downloads from './components/Downloads'
@@ -103,6 +104,8 @@ function Row({ t, active, onPlay, right }: { t: Track; active?: boolean; onPlay:
 }
 
 export default function App() {
+  const desktop = window.stormusicDesktop
+  const [compact, setCompact] = useState(false)
   const [profile, setProfile] = useState<Profile | null>(() => load('ytm.profile', null))
   const [fb, setFb] = useState<Feedback>(() => load('ytm.fb', { liked: [], disliked: [], played: [] }))
   const [repeatDays, setRepeatWindow] = useState(getRepeatDays)
@@ -432,6 +435,19 @@ export default function App() {
 
   if (!profile) return <div className="h-full max-w-[480px] mx-auto"><Onboarding onDone={(p) => setProfile(p)} /></div>
 
+  const changeDesktopMode = async (value: boolean) => {
+    try {
+      if (await desktop?.setCompact(value)) setCompact(value)
+    } catch { flash('Não foi possível mudar o modo da janela.') }
+  }
+
+  if (compact) return <DesktopPlayer
+    track={cur} time={time} duration={dur} wantsPlay={playerState.wantPlay} message={toast}
+    onExpand={() => void changeDesktopMode(false)} onStart={() => startMix()}
+    onPrevious={prev} onToggle={togglePlay} onNext={next}
+    onSeek={position => { if (audio.current) audio.current.currentTime = position }}
+  />
+
   const liked = likedTracks()
   const pct = dur ? (time / dur) * 100 : 0
 
@@ -459,6 +475,7 @@ export default function App() {
       <header className="pt-safe sticky top-0 z-20 bg-[#030303]/95 backdrop-blur">
         <div className="h-14 px-4 flex items-center justify-between">
           <Logo />
+          {desktop && <button className="ml-auto mr-2 rounded-lg px-3 py-2 text-xs text-white/80 hover:bg-white/10" onClick={() => void changeDesktopMode(true)}>Modo widget</button>}
           <div className="flex items-center gap-5 text-white/90"><Search size={22} onClick={() => setTab('explore')} /><button aria-label="Abrir perfil" onClick={() => setProfileOpen(true)} className="w-7 h-7 rounded-full bg-[#7c3aed] text-xs font-bold">EU</button></div>
         </div>
         {tab === 'home' && (
@@ -557,7 +574,7 @@ export default function App() {
               {installEvt && <button onClick={async () => { await installEvt.prompt(); setInstallEvt(null) }} className="h-9 px-4 rounded-full bg-white text-black font-medium flex items-center gap-2"><Smartphone size={14} /> Instalar app</button>}
             </div>
           </div>
-          <LocalEngine />
+          {desktop ? <DesktopUpdates /> : <LocalEngine />}
           {getMode() === 'audioflow' && <details><summary className="mt-4 text-sm text-white/60">Configuração AudioFlow (legado)</summary>
           <h2 className="text-lg font-bold mt-6 mb-1">Servidor de stream</h2>
           <p className="text-xs text-white/50 mb-2">Relay com yt-dlp no seu PC ou no celular (Termux). Vazio = relay embutido.</p>

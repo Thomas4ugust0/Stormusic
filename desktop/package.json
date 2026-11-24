@@ -1,0 +1,41 @@
+{
+  "name": "stormusic-desktop",
+  "productName": "Stormusic",
+  "version": "1.0.0",
+  "description": "Stormusic para Windows com miniplayer flutuante",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "author": "Stormusic",
+  "scripts": {
+    "start": "electron .",
+    "tools": "node prepare-tools.mjs",
+    "package:windows": "electron-builder --win portable --x64 --publish never",
+    "test": "node --test relay.test.mjs",
+    "test:windows": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "electron": "45.5.0",
+    "electron-builder": "26.18.0",
+    "playwright-core": "1.65.1"
+  },
+  "build": {
+    "appId": "app.stormusic.desktop",
+    "directories": {
+      "buildResources": "../public",
+      "output": "build/windows"
+    },
+    "files": ["main.mjs", "preload.cjs", "relay.mjs", "tool-download.mjs"],
+    "extraResources": [
+      { "from": "build/web", "to": "web" },
+      { "from": "build/tools", "to": "tools" },
+      { "from": "../server", "to": "server", "filter": ["*.ts", "!*.test.ts"] }
+    ],
+    "win": {
+      "icon": "../public/stormusic-icon-512.png",
+      "target": "portable",
+      "signAndEditExecutable": false,
+      "artifactName": "Stormusic-Windows-${arch}.exe"
+    }
+  }
+}

@@ -1,0 +1,50 @@
+name: Stormusic Windows
+
+on:
+  push:
+    branches: [phone-dist]
+    paths:
+      - .github/workflows/desktop-windows.yml
+      - desktop/**
+      - public/**
+      - server/**
+      - src/**
+      - index.html
+      - package*.json
+      - vite.config.ts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix desktop
+      - run: npm --prefix desktop test
+      - run: npm run package:desktop
+      - run: npm --prefix desktop run test:windows
+      - name: Gerar SHA-256
+        working-directory: desktop/build/windows
+        run: |
+          $file = 'Stormusic-Windows-x64.exe'
+          $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $file" | Out-File -Encoding ascii "${file}.sha256"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Stormusic-Windows-x64
+          path: |
+            desktop/build/windows/Stormusic-Windows-x64.exe
+            desktop/build/windows/Stormusic-Windows-x64.exe.sha256
+          if-no-files-found: error
