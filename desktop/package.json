@@ -11,7 +11,7 @@
     "start": "electron .",
     "tools": "node prepare-tools.mjs",
     "package:windows": "electron-builder --win portable --x64 --publish never",
-    "test": "node --test relay.test.mjs",
+    "test": "node --test relay.test.mjs tool-download.test.mjs",
     "test:windows": "node smoke.mjs"
   },
   "devDependencies": {

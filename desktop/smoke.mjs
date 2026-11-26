@@ -15,6 +15,7 @@ let application
 
 async function launch() {
   application = await electron.launch({ executablePath, args: [`--user-data-dir=${profile}`], timeout: 120000 })
+  application.process().stderr?.pipe(process.stderr, { end: false })
   assert.equal(await application.evaluate(({ app }) => app.getPath('userData')), profile)
   return application.firstWindow({ timeout: 120000 })
 }
@@ -49,6 +50,7 @@ try {
   assert.equal(await pinned(), true)
   assert.ok(await page.evaluate(() => innerHeight <= 155), 'Widget has compact content bounds')
   await page.getByRole('button', { name: 'Voltar ao app' }).click()
+  await page.getByRole('main', { name: 'Widget do Stormusic' }).waitFor({ state: 'hidden' })
   assert.equal(await pinned(), false)
 
   await page.getByRole('button', { name: 'Biblioteca', exact: true }).click()
@@ -65,6 +67,7 @@ try {
   await resume.click()
   await page.waitForFunction(position => Number(document.querySelector('[aria-label="Posição da faixa"]')?.value) > position, pausedAt)
   await widget.getByRole('button', { name: 'Voltar ao app' }).click()
+  await widget.waitFor({ state: 'hidden' })
   assert.equal(await pinned(), false)
   await page.getByText(title).first().waitFor()
   console.log('Widget fixo, faixa local, pausa, retomada e retorno à janela completa verificados.')

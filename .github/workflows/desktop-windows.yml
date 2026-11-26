@@ -35,6 +35,30 @@ jobs:
       - run: npm --prefix desktop test
       - run: npm run package:desktop
       - run: npm --prefix desktop run test:windows
+      - name: Abrir o executável portátil
+        working-directory: desktop/build/windows
+        run: |
+          $profile = Join-Path $env:RUNNER_TEMP 'stormusic-portable-smoke'
+          $launcher = Start-Process -FilePath (Resolve-Path 'Stormusic-Windows-x64.exe') -ArgumentList "--user-data-dir=`"$profile`"" -PassThru
+          $player = $null
+          try {
+            $deadline = (Get-Date).AddMinutes(2)
+            do {
+              $launcher.Refresh()
+              if ($launcher.HasExited) { throw "O executável portátil saiu com código $($launcher.ExitCode)." }
+              $child = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($launcher.Id) AND Name='Stormusic.exe'" | Select-Object -First 1
+              if ($child) { $player = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue }
+              if ($player -and $player.MainWindowTitle -eq 'Stormusic') { break }
+              Start-Sleep -Seconds 1
+            } while ((Get-Date) -lt $deadline)
+            if (!$player -or $player.MainWindowTitle -ne 'Stormusic') { throw 'A janela do Stormusic portátil não abriu.' }
+            Write-Output 'O executável portátil abriu a janela do Stormusic.'
+          } finally {
+            if ($player -and !$player.HasExited) {
+              if (!$player.CloseMainWindow() -or !$player.WaitForExit(15000)) { Stop-Process -Id $player.Id }
+            }
+            if (!$launcher.WaitForExit(15000)) { Stop-Process -Id $launcher.Id }
+          }
       - name: Gerar SHA-256
         working-directory: desktop/build/windows
         run: |

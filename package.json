@@ -11,7 +11,7 @@
     "relay": "node server/standalone.ts",
     "build:phone": "vite build --mode phone",
     "build:desktop": "vite build --mode desktop --outDir desktop/build/web",
-    "desktop": "npm run build:desktop && npm --prefix desktop start",
+    "desktop": "npm run build:desktop && npm --prefix desktop run tools && npm --prefix desktop start",
     "package:desktop": "npm run build:desktop && npm --prefix desktop run tools && npm --prefix desktop run package:windows",
     "test:relay": "node --test --test-concurrency=1 server/*.test.ts",
     "test:unit": "node --test src/lib/*.test.ts"
