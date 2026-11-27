@@ -1,5 +1,5 @@
 import { flushDownloadDeletes } from './lib/downloadActions'
-import DesktopPlayer, { DesktopUpdates } from './components/DesktopPlayer'
+import DesktopPlayer, { DesktopUpdates, DesktopVolume } from './components/DesktopPlayer'
 import { getRepeatDays, setRepeatDays, rememberRemovedDownloads, isDownloadRemoved } from './lib/listeningPolicy'
 import { eligibleTracks, markPlayed, reloadTaste } from './lib/taste'
 import Downloads from './components/Downloads'
@@ -25,6 +25,7 @@ import { resolveAudio, prefetch, invalidate, getRelay, setRelay, getAudioFlow, s
 
 const load = <T,>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem(k) ?? '') as T } catch { return d } }
 const RED = '#ff0033'
+const DESKTOP_VOLUME_KEY = 'ytm.desktopVolume'
 const ago = (at: number) => { const m = Math.round((Date.now() - at) / 60000); return m < 60 ? `há ${Math.max(1, m)} min` : `há ${Math.round(m / 60)}h` }
 
 function Logo() {
@@ -106,6 +107,10 @@ function Row({ t, active, onPlay, right }: { t: Track; active?: boolean; onPlay:
 export default function App() {
   const desktop = window.stormusicDesktop
   const [compact, setCompact] = useState(false)
+  const [volume, setVolume] = useState(() => {
+    const saved = desktop ? load<unknown>(DESKTOP_VOLUME_KEY, 100) : 100
+    return typeof saved === 'number' && Number.isInteger(saved) && saved >= 0 && saved <= 100 ? saved : 100
+  })
   const [profile, setProfile] = useState<Profile | null>(() => load('ytm.profile', null))
   const [fb, setFb] = useState<Feedback>(() => load('ytm.fb', { liked: [], disliked: [], played: [] }))
   const [repeatDays, setRepeatWindow] = useState(getRepeatDays)
@@ -406,6 +411,11 @@ export default function App() {
     return () => { engine.destroy(); player.current = null }
   }, [])
   useEffect(() => {
+    if (!desktop || !(player.current instanceof Player)) return
+    player.current.setVolume(volume / 100)
+    try { localStorage.setItem(DESKTOP_VOLUME_KEY, String(volume)) } catch { /* Playback continues when storage is unavailable. */ }
+  }, [desktop, volume])
+  useEffect(() => {
     const l = listen.current
     if (l && l.sec >= 1) markPlayed(l.t, l.lastHeardAt)
     if (l && !l.recorded && !l.suppressed) { recordPlayback(l.t, l.sec, l.ended, l.lastHeardAt); if (l.sec >= 1 || l.ended) setTasteRev(r => r + 1) }
@@ -443,6 +453,7 @@ export default function App() {
 
   if (compact) return <DesktopPlayer
     track={cur} time={time} duration={dur} wantsPlay={playerState.wantPlay} message={toast}
+    volume={volume} onVolumeChange={setVolume}
     onExpand={() => void changeDesktopMode(false)} onStart={() => startMix()}
     onPrevious={prev} onToggle={togglePlay} onNext={next}
     onSeek={position => { if (audio.current) audio.current.currentTime = position }}
@@ -478,6 +489,9 @@ export default function App() {
           {desktop && <button className="ml-auto mr-2 rounded-lg px-3 py-2 text-xs text-white/80 hover:bg-white/10" onClick={() => void changeDesktopMode(true)}>Modo widget</button>}
           <div className="flex items-center gap-5 text-white/90"><Search size={22} onClick={() => setTab('explore')} /><button aria-label="Abrir perfil" onClick={() => setProfileOpen(true)} className="w-7 h-7 rounded-full bg-[#7c3aed] text-xs font-bold">EU</button></div>
         </div>
+        {desktop && !(full && cur) && <div className="flex justify-end px-4 pb-2">
+          <DesktopVolume value={volume} onChange={setVolume} />
+        </div>}
         {tab === 'home' && (
           <div className="flex gap-2 px-4 pb-3 overflow-x-auto no-scrollbar">{MOODS.map((m) => <button key={m.id} onClick={() => changeMood(m.id)} className={`shrink-0 h-8 px-3 rounded-lg text-sm transition ${mood === m.id ? 'bg-white text-black font-medium' : 'bg-white/10'}`}>{m.label}</button>)}</div>
         )}
@@ -682,6 +696,9 @@ export default function App() {
               <button onClick={() => togglePlay()} className="w-[72px] h-[72px] rounded-full bg-white grid place-items-center">{playing ? <Pause size={32} fill="#000" color="#000" /> : <Play size={32} fill="#000" color="#000" className="ml-1" />}</button>
               <button onClick={next}><SkipForward size={32} fill="#fff" /></button>
             </div>
+            {desktop && <div className="mt-3 flex justify-center">
+              <DesktopVolume value={volume} onChange={setVolume} />
+            </div>}
             <div className="flex justify-around mt-5 mb-3 text-sm font-medium">
               {(['queue', 'lyrics'] as const).map((p) => <button key={p} onClick={() => setPanel(panel === p ? null : p)} className={`flex items-center gap-1.5 ${panel === p ? 'text-white' : 'text-white/50'}`}>{p === 'queue' ? <><ListMusic size={16} /> A seguir</> : 'Letra'}</button>)}
 

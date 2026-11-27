@@ -32,9 +32,11 @@ test('slider persists, filters an existing offline mix, and exhaustion stops ins
   localStorage.setItem('ytm.supermix',JSON.stringify({at:now,tracks:[heard,fresh],kinds:{},online:true}))
   localStorage.setItem('ytm.dailyPlan',JSON.stringify({at:now,tracks:[heard,fresh]}))
   localStorage.setItem('ytm.taste',JSON.stringify({ev:[{y:heard.ytId,k:'listen',at:now-2*86400000}],meta:{[heard.ytId]:heard}}))
+  Object.assign(w, { stormusicDesktop: { setCompact: async () => true } })
   const audios: FakeAudio[]=[]
   class FakeAudio {
     src='';dataset: Record<string,string>={};paused=true;ended=false;duration=180;currentTime=0;readyState=4;plays=0
+    volume = 1
     onplaying?:()=>void;onpause?:()=>void;ontimeupdate?:()=>void;onended?:()=>void
     constructor(){audios.push(this)}
     async play(){this.paused=false;this.plays++;this.onplaying?.()}
@@ -71,6 +73,32 @@ test('slider persists, filters an existing offline mix, and exhaustion stops ins
   await click(document.querySelector('[aria-label="Tocar Fresh song"]')!)
   assert.equal(audios.reduce((n,a)=>n+a.plays,0),1)
   const audio=audios.find(a=>!a.paused)!
+  const volumeSlider = () => {
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="Volume"]')
+    assert.ok(input)
+    return input
+  }
+  await t.test('desktop volume changes during playback and stays in sync across modes', async () => {
+    assert.equal(volumeSlider().value, '100')
+    const changeVolume = (value: string) => act(async () => {
+      const input = volumeSlider()
+      Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+      input.dispatchEvent(new w.Event('input', { bubbles: true }))
+      input.dispatchEvent(new w.Event('change', { bubbles: true }))
+      await settle()
+    })
+    await changeVolume('42')
+    assert.equal(audio.volume, 0.42)
+    await click([...document.querySelectorAll('button')].find(button => button.textContent === 'Modo widget')!)
+    assert.equal(volumeSlider().value, '42')
+    await changeVolume('0')
+    assert.equal(audio.volume, 0)
+    assert.equal(audio.paused, false)
+    assert.equal(audio.plays, 1)
+    await click(document.querySelector('[aria-label="Voltar ao app"]')!)
+    assert.equal(volumeSlider().value, '0')
+    assert.equal(localStorage.getItem('ytm.desktopVolume'), '0')
+  })
   await act(async()=>{audio.currentTime=1.1;audio.ontimeupdate?.();await settle()})
   assert.ok(JSON.parse(localStorage.getItem('ytm.taste')!).playedAt[fresh.ytId])
   await act(async()=>{audio.currentTime=180;audio.ended=true;audio.onended?.();await settle()})
@@ -78,6 +106,8 @@ test('slider persists, filters an existing offline mix, and exhaustion stops ins
   assert.equal(audios.reduce((n,a)=>n+a.plays,0),1)
   assert.match(document.body.textContent!,/Não há mais faixas disponíveis sem repetir/)
   await act(async()=>{root.render(createElement(App,{key:'reload'}));await settle()})
+  assert.equal(volumeSlider().value, '0')
+  assert.equal(audios.at(-2)?.volume, 0)
   await click([...document.querySelectorAll('button')].find(b=>b.textContent==='Biblioteca')!)
   assert.equal((document.querySelector('#repeat-days') as HTMLInputElement).value,'10')
   await click(document.querySelector('[aria-label="Tocar Fresh song"]')!)

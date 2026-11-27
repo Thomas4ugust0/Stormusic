@@ -51,6 +51,7 @@ export class Player {
   pause(element: HTMLAudioElement) { if (!element.paused) this.internalPauses.set(element, (this.internalPauses.get(element) || 0) + 1); element.pause() }
   advance() { if (this.advancing) return; this.advancing = true; this.hooks.ended() }
   get audio() { return this.elements[this.active] }
+  setVolume(volume: number) { for (const element of this.elements) element.volume = volume }
   dispatch(event: PlayerEvent) { this.state = reduce(this.state, event); this.hooks.state(this.state); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = this.state.status === 'playing' ? 'playing' : 'paused' }
   intent(play: boolean, defer = false) {
     if (play) this.tapAt = performance.now()
